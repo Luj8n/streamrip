@@ -185,30 +185,8 @@ async def url(ctx, urls):
     try:
         with ctx.obj["config"] as cfg:
             cfg: Config
-            updates = cfg.session.misc.check_for_updates
-            if updates:
-                # Run in background
-                version_coro = asyncio.create_task(
-                    latest_streamrip_version(
-                        verify_ssl=cfg.session.downloads.verify_ssl
-                    )
-                )
-            else:
-                version_coro = None
-
             async with Main(cfg) as main:
                 await main.stream_process_urls(urls)
-
-            if version_coro is not None:
-                latest_version, notes = await version_coro
-                if latest_version != __version__:
-                    console.print(
-                        f"\n[green]A new version of streamrip [cyan]v{latest_version}[/cyan]"
-                        " is available! Run [white][bold]pip3 install streamrip --upgrade[/bold][/white]"
-                        " to update.[/green]\n"
-                    )
-
-                    console.print(Markdown(notes))
 
     except aiohttp.ClientConnectorCertificateError as e:
         from ..utils.ssl_utils import print_ssl_error_help

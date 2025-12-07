@@ -241,7 +241,6 @@ class CliConfig:
 @dataclass(slots=True)
 class MiscConfig:
     version: str
-    check_for_updates: bool
 
 
 HOME = Path.home()
