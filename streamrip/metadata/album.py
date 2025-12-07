@@ -54,7 +54,7 @@ class AlbumMetadata:
     purchase_date: str | None = None
     # Additional Deezer tags
     bpm: int | None = None
-    barcode: str | None = None  # UPC/Barcode
+    upc: str | None = None  # UPC/Barcode
     releasetype: str | None = None  # Vorbis standard name
     # New standard tags
     album_artist_credit: str | None = None  # Different from album artist
@@ -144,7 +144,7 @@ class AlbumMetadata:
         item_id = str(resp.get("qobuz_id"))
         
         # Extract additional Qobuz metadata
-        barcode = resp.get("upc")
+        upc = resp.get("upc")
         # Normalize release type casing: keep EP uppercase, others title case
         raw_type = resp.get("release_type")
         type_mapper = {
@@ -190,7 +190,7 @@ class AlbumMetadata:
             lyrics=None,
             purchase_date=None,
             tracktotal=tracktotal,
-            barcode=barcode,
+            upc=upc,
             releasetype=releasetype,
             originaldate=originaldate,
             media_type=media_type,
@@ -215,7 +215,7 @@ class AlbumMetadata:
         
         # Extract additional Deezer metadata - keep it simple
         bpm = None  # Album-level BPM typically not used, let tracks handle it
-        barcode = resp.get("upc")  # Use standardized name
+        upc = resp.get("upc")  # Use standardized name
         releasetype = resp.get("record_type")  # Use Vorbis standard name
         
         # Additional standard metadata
@@ -267,7 +267,7 @@ class AlbumMetadata:
             purchase_date=None,
             tracktotal=tracktotal,
             bpm=bpm,
-            barcode=barcode,
+            upc=upc,
             releasetype=releasetype,
             album_artist_credit=album_artist_credit,
             originaldate=originaldate,
@@ -382,7 +382,7 @@ class AlbumMetadata:
                     label = label_match.group(1).strip()
         
         # Extract additional Tidal metadata
-        barcode = resp.get("upc")  # UPC/Barcode
+        upc = resp.get("upc")  # UPC/Barcode
         # Normalize release type casing: keep EP uppercase, others title case
         raw_type = resp.get("type")
         if raw_type:
@@ -452,7 +452,7 @@ class AlbumMetadata:
             lyrics=None,
             purchase_date=None,
             tracktotal=tracktotal,
-            barcode=barcode,
+            upc=upc,
             releasetype=releasetype,
             media_type=media_type,
         )

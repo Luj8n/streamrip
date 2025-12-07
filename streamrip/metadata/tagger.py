@@ -44,7 +44,7 @@ MP4_KEYS = (
     "----:com.apple.iTunes:ISRC",
     "©pub",  # label/publisher
     "tmpo",  # bpm
-    "----:com.apple.iTunes:BARCODE",  # was UPC
+    "----:com.apple.iTunes:UPC",
     "----:com.apple.iTunes:RELEASETYPE",  # was RECORD_TYPE
     "----:com.apple.iTunes:TRACK_ARTIST_CREDIT",
     "----:com.apple.iTunes:ALBUM_ARTIST_CREDIT",
@@ -78,7 +78,7 @@ MP3_KEYS = (
     id3.TSRC,
     id3.TPUB,  # label/publisher 
     id3.TBPM,  # bpm
-    None,  # barcode (handled as TXXX)
+    None,  # upc (handled as TXXX)
     None,  # releasetype (handled as TXXX)
     None,  # track_artist_credit (handled as TXXX)
     None,  # album_artist_credit (handled as TXXX)
@@ -112,7 +112,7 @@ METADATA_TYPES = (
     "isrc",
     "label",
     "bpm",
-    "barcode",
+    "upc",
     "releasetype",
     "track_artist_credit",
     "album_artist_credit",
@@ -198,7 +198,7 @@ class Container(Enum):
                     text = ", ".join(artists) if isinstance(artists, list) else str(artists)
                     out.append((f"TXXX:{k.upper()}", text))
                 continue
-            elif k in ["barcode", "releasetype", "track_artist_credit", "album_artist_credit", "media_type", "purchase_date", "originaldate"]:
+            elif k in ["upc", "releasetype", "track_artist_credit", "album_artist_credit", "media_type", "purchase_date", "originaldate"]:
                 # Handle as TXXX custom tags
                 text = self._attr_from_meta(meta, k)
                 if text is not None:
@@ -243,7 +243,7 @@ class Container(Enum):
                     text = text.encode("utf-8")
                     out.append((v, text))
                 continue
-            elif k in ["barcode", "releasetype", "track_artist_credit", "album_artist_credit", "originaldate", "media_type"] and v is not None:
+            elif k in ["upc", "releasetype", "track_artist_credit", "album_artist_credit", "originaldate", "media_type"] and v is not None:
                 # Handle custom MP4 freeform tags that need bytes encoding
                 text = self._attr_from_meta(meta, k)
                 if text is not None:

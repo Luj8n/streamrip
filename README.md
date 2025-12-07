@@ -50,7 +50,7 @@ A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
 - **Metadata model modernization**
 
   - Standardized fields aligned with Vorbis/MusicBrainz conventions.
-  - Renamed: `upc` → `barcode`, `record_type` → `releasetype`, `original_release_date` → `originaldate`.
+  - Renamed: `record_type` → `releasetype`, `original_release_date` → `originaldate`.
   - Removed legacy mapping dictionaries, replaced with type-safe structures.
   - Removed source platform identification metadata (no TIDAL_TRACK_ID, DEEZER_ALBUM_ID, etc. tags).
 
