@@ -4,58 +4,71 @@
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/python/black)
 
 A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
-# Differences Between This Fork (`main`) and Upstream (`dev`)
+
+# Differences
 
 ## Functionality / User-Facing
 
 - **Metadata enrichment (Deezer, Tidal, Qobuz)**
-  - Added: BPM, ReplayGain (track & album), UPC/barcode, record type, artist credits, original release date, media type.
-  - Normalized casing of release types (e.g., “EP”), consistent container and bit-depth fields.
+
+  - Added: BPM, UPC/barcode, record type, artist credits, original release date, media type.
+  - Normalized casing of release types (e.g., "EP"), consistent container and bit-depth fields.
   - Composer and performer credits parsed and applied where supported.
   - Deduplication utilities reduce redundant copyright tags.
 
 - **Multi-artist support**
+
   - Introduced `artists` tag alongside `artist`, preserving compatibility but capturing full credits.
 
 - **Favorites ripping across services**
+
   - Deezer, Tidal, Qobuz: Profile-based favorites via URL parser.
   - Supports artists, albums, tracks, and playlists.
 
 - **Path templating improvements**
-  - Extended placeholders: `{releasetype}`, `{upc}`, `{source_artist_id}` with correct casing.
+
+  - Extended placeholders: `{releasetype}`, `{upc}` with correct casing.
   - More accurate container detection (real downloadable format per track).
   - Enables richer file/folder naming schemes.
 
 - **Download performance & reliability**
+
   - Non-blocking download initiation (`asyncio.to_thread`) prevents new downloads from freezing active ones.
   - Streamability checks improved (e.g., Deezer’s `readable` field).
 
 - **Configurable lyrics fetching (Tidal)**
+
   - Added `fetch_lyrics` config option (default: true).
 
 - **Smarter skipping & release detection**
   - Skips only downloaded albums, not entire artists/labels.
   - Maintains `DownloadedReleases` tracking table.
   - Cleaner summary-style logs for large batches.
+
 ## Architecture / Developer-Focused
 
 - **Metadata model modernization**
+
   - Standardized fields aligned with Vorbis/MusicBrainz conventions.
-  - Renamed: `upc` → `barcode`, `gain` → `replaygain_*`, `record_type` → `releasetype`, `original_release_date` → `originaldate`.
+  - Renamed: `upc` → `barcode`, `record_type` → `releasetype`, `original_release_date` → `originaldate`.
   - Removed legacy mapping dictionaries, replaced with type-safe structures.
+  - Removed source platform identification metadata (no TIDAL_TRACK_ID, DEEZER_ALBUM_ID, etc. tags).
 
 - **Favorites pipeline**
+
   - New `DeezerProfileURL` parser and `PendingUserFavorites`/`UserFavorites` types.
   - Unified handling across Deezer, Tidal, and Qobuz.
   - Tidal & Qobuz: Consistent favorites pipeline with standardized `{"items": [...]}` response.
 
 - **Quality handling refactor**
+
   - Unified quality scale (0–3) with fallback to lower qualities when tracks are not available at desired quality.
   - Moved quality determination into metadata phase, reducing duplicate API calls.
   - Added `streamable` to `TrackInfo`.
   - Centralized `NonStreamableError` handling.
 
 - **Concurrency & rate limiting**
+
   - Deezer client uses `asyncio.Semaphore` for concurrency.
   - Rate limiter (`AsyncLimiter`, ~10 req/sec).
   - Configurable HTTP connection pooling.
@@ -63,6 +76,7 @@ A scriptable stream downloader for Qobuz, Tidal, Deezer and SoundCloud.
   - Tidal client: respects 429 `Retry-After` headers, raises `NonStreamableError` on 404.
 
 - **Testing & utilities**
+
   - Expanded unit tests: Deezer concurrency/limits, favorites URL parsing, path templates, config evolution.
   - New helpers: `parse_performers()`, `deduplicate_copyright()`.
 
@@ -107,17 +121,21 @@ rip
 it should show the main help page. If you have no idea what these mean, or are having other issues installing, check out the [detailed installation instructions](https://github.com/nathom/streamrip/wiki#detailed-installation-instructions).
 
 For Arch Linux users, an AUR package exists. Make sure to install required packages from the AUR before using `makepkg` or use an AUR helper to automatically resolve them.
+
 ```
 git clone https://aur.archlinux.org/streamrip.git
 cd streamrip
 makepkg -si
 ```
- or
- ```
+
+or
+
+```
 paru -S streamrip
 ```
 
 Alternatively, for users of Homebrew, you can install streamrip through brew.
+
 ```
 brew install streamrip
 ```
@@ -177,7 +195,7 @@ rip search tidal playlist 'rap'
 
 ![streamrip interactive search](https://github.com/nathom/streamrip/blob/dev/demo/playlist_search.png?raw=true)
 
-Search for *Rumours* on Tidal, and download it
+Search for _Rumours_ on Tidal, and download it
 
 ```bash
 rip search tidal album 'fleetwood mac rumours'

@@ -1,4 +1,4 @@
-# Use Ubuntu base (required for Camoufox/Playwright dependencies)
+# Use Ubuntu base
 FROM lscr.io/linuxserver/baseimage-ubuntu:jammy
 
 ENV PUID=99 \
@@ -16,33 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     make \
     git \
-    # Playwright/Browser dependencies
-    wget \
-    curl \
-    ca-certificates \
-    fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libatspi2.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libwayland-client0 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
-    xvfb \
-    # RYM metadata dependencies
-    libxml2-dev \
-    libxslt-dev \
-    zlib1g-dev \
     # Audio validation tools
     flac \
     ffmpeg \
@@ -62,28 +35,16 @@ RUN ln -s /usr/bin/python3 /usr/bin/python && \
     poetry install --only main --no-root && \
     pip3 uninstall -y poetry
 
-# Layer 3: Install Camoufox packages and download browserforge data (browser/GeoIP downloaded at runtime)
-RUN pip3 install --no-cache-dir camoufox "camoufox[geoip]" && \
-    python3 -m browserforge update && \
-    chmod -R a+rwX /usr/local/lib/python3.*/dist-packages/browserforge 2>/dev/null || true && \
-    chmod -R a+rwX /usr/local/lib/python3.*/dist-packages/camoufox 2>/dev/null || true && \
-    pip3 cache purge && \
-    find /usr/local/lib/python3.*/dist-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
-    find /usr/local/lib/python3.*/dist-packages -type f -name "*.pyc" -delete 2>/dev/null || true
-
-# Layer 4: Streamrip code (changes frequently, rebuilds quickly)
+# Layer 3: Streamrip code (changes frequently, rebuilds quickly)
 COPY . /app/
 RUN cd /app && \
     pip3 install --no-cache-dir . && \
-    # Ensure browserforge/camoufox files are readable+writable after streamrip install (for GeoIP download)
-    chmod -R a+rwX /usr/local/lib/python3.*/dist-packages/browserforge 2>/dev/null || true && \
-    chmod -R a+rwX /usr/local/lib/python3.*/dist-packages/camoufox 2>/dev/null || true && \
     # Cleanup build dependencies to reduce image size
-    apt-get purge -y gcc g++ python3-dev libxml2-dev libxslt-dev && \
+    apt-get purge -y gcc g++ python3-dev && \
     apt-get autoremove -y && \
     rm -rf /tmp/* /root/.cache /var/lib/apt/lists/*
 
-# Layer 5: Runtime configuration
+# Layer 4: Runtime configuration
 # Save the real rip binary and create wrapper for permission handling
 RUN mv /usr/local/bin/rip /usr/local/bin/rip.bin && \
     printf '%s\n' \
@@ -94,75 +55,6 @@ RUN mv /usr/local/bin/rip /usr/local/bin/rip.bin && \
       'exec gosu ${PUID:-99}:${PGID:-100} env HOME=/config /usr/local/bin/rip.bin "$@"' \
       > /usr/local/bin/rip && \
     chmod +x /usr/local/bin/rip
-
-# Create rym-tag wrapper that reads proxy config from streamrip config
-RUN mv /usr/local/bin/rym-tag /usr/local/bin/rym-tag.bin && \
-    printf '%s\n' \
-      '#!/bin/bash' \
-      'set -e' \
-      'export HOME=/config' \
-      '' \
-      '# Helper function to extract config value from [rym.config] section' \
-      'get_config_value() {' \
-      '    local key="$1"' \
-      '    # Extract entire [rym.config] section (from [rym.config] to next [ or end of file)' \
-      '    local value=$(sed -n '"'"'/^\[rym\.config\]/,/^\[/p'"'"' "$CONFIG_FILE" | grep "^$key" | awk -F"\"" '"'"'{print $2}'"'"')' \
-      '    # If no quoted value, try unquoted (for booleans and numbers)' \
-      '    if [ -z "$value" ]; then' \
-      '        value=$(sed -n '"'"'/^\[rym\.config\]/,/^\[/p'"'"' "$CONFIG_FILE" | grep "^$key" | sed '"'"'s/^[^=]*=[[:space:]]*\([^#]*\)/\1/'"'"' | sed '"'"'s/[[:space:]]*$//'"'"')' \
-      '    fi' \
-      '    echo "$value"' \
-      '}' \
-      '' \
-      '# Read proxy config from streamrip config.toml if it exists' \
-      'CONFIG_FILE="/config/.config/streamrip/config.toml"' \
-      'if [ -f "$CONFIG_FILE" ]; then' \
-      '    PROXY_ENABLED=$(get_config_value "proxy_enabled")' \
-      '    if [ "$PROXY_ENABLED" = "true" ]; then' \
-      '        export PROXY_HOST=$(get_config_value "proxy_host")' \
-      '        export PROXY_PORT=$(get_config_value "proxy_port")' \
-      '        export PROXY_USERNAME=$(get_config_value "proxy_username")' \
-      '        export PROXY_PASSWORD=$(get_config_value "proxy_password")' \
-      '    fi' \
-      '    # Read Groq API key for LLM matching fallback' \
-      '    GROQ_KEY=$(get_config_value "groq_api_key")' \
-      '    if [ -n "$GROQ_KEY" ]; then' \
-      '        export GROQ_API_KEY="$GROQ_KEY"' \
-      '    fi' \
-      'fi' \
-      '' \
-      'cd /downloads' \
-      'exec gosu ${PUID:-99}:${PGID:-100} env HOME=/config PROXY_HOST="$PROXY_HOST" PROXY_PORT="$PROXY_PORT" PROXY_USERNAME="$PROXY_USERNAME" PROXY_PASSWORD="$PROXY_PASSWORD" GROQ_API_KEY="$GROQ_API_KEY" /usr/local/bin/rym-tag.bin "$@"' \
-      > /usr/local/bin/rym-tag && \
-    chmod +x /usr/local/bin/rym-tag
-
-# Camoufox setup script - runs on container start before rip
-RUN mkdir -p /etc/cont-init.d && \
-    printf '%s\n' \
-      '#!/usr/bin/with-contenv bash' \
-      'set -e' \
-      '' \
-      'if [ ! -d "/config/.cache/camoufox" ] || [ -z "$(ls -A /config/.cache/camoufox 2>/dev/null)" ]; then' \
-      '    echo "================================================"' \
-      '    echo "[Camoufox Setup] First run detected!"' \
-      '    echo "[Camoufox Setup] Downloading browser binaries and GeoIP data (~2.8GB)"' \
-      '    echo "[Camoufox Setup] This will take 2-5 minutes depending on your connection..."' \
-      '    echo "================================================"' \
-      '    ' \
-      '    export HOME=/config' \
-      '    python3 -m camoufox fetch' \
-      '    ' \
-      '    chown -R ${PUID}:${PGID} /config/.cache 2>/dev/null || true' \
-      '    ' \
-      '    echo "================================================"' \
-      '    echo "[Camoufox Setup] Download complete!"' \
-      '    echo "[Camoufox Setup] Browser cache stored in /config/.cache/camoufox"' \
-      '    echo "================================================"' \
-      'else' \
-      '    echo "[Camoufox Setup] Browser cache found at /config/.cache/camoufox, skipping download"' \
-      'fi' \
-      > /etc/cont-init.d/10-setup-camoufox && \
-    chmod +x /etc/cont-init.d/10-setup-camoufox
 
 # single job script used both at startup and daily; imports env via s6
 RUN mkdir -p /etc/periodic/daily && \
@@ -175,7 +67,7 @@ RUN mkdir -p /etc/periodic/daily && \
       > /etc/periodic/daily/rip-tidal && \
     chmod +x /etc/periodic/daily/rip-tidal
 
-# run once on container start (after camoufox setup)
+# run once on container start
 RUN ln -s /etc/periodic/daily/rip-tidal /etc/cont-init.d/99-run-rip-once
 
 # cron setup (4 AM EDT daily) - Ubuntu uses /etc/cron.d/
@@ -192,7 +84,6 @@ RUN mkdir -p /etc/services.d/crond && \
       > /etc/services.d/crond/run && \
     chmod +x /etc/services.d/crond/run
 
-# Set runtime HOME to /config for user access to cached browser
 ENV HOME=/config
 
 VOLUME /config /downloads /library

@@ -119,10 +119,6 @@ def rip(
         install(console=console, suppress=[click, asyncio], max_frames=1)
         logger.setLevel(logging.INFO)
 
-    # Enable RYM library logs to match streamrip verbosity
-    rym_logger = logging.getLogger("rym")
-    rym_logger.setLevel(logger.level)
-
     if not os.path.isfile(config_path):
         console.print(
             f"No file found at [bold cyan]{config_path}[/bold cyan], creating default config.",

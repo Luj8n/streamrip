@@ -52,101 +52,17 @@ class AlbumMetadata:
     grouping: str | None = None
     lyrics: str | None = None
     purchase_date: str | None = None
-    source_platform: str | None = None
-    source_album_id: str | None = None
-    source_artist_id: str | None = None
     # Additional Deezer tags
     bpm: int | None = None
     barcode: str | None = None  # UPC/Barcode
-    replaygain_album_gain: str | None = None  # ReplayGain format: "+/-X.XX dB"
     releasetype: str | None = None  # Vorbis standard name
     # New standard tags
     album_artist_credit: str | None = None  # Different from album artist
     originaldate: str | None = None  # Vorbis standard name
     media_type: str | None = None  # "WEB" for streaming sources
-    # RYM metadata
-    rym_descriptors: list[str] | None = None  # RateYourMusic descriptors
 
     def get_genres(self) -> str:
         return ", ".join(self.genre)
-
-    def _get_rym_album_type(self) -> str:
-        """Map streaming metadata to RYM album type."""
-        if not self.releasetype:
-            return "album"  # Default
-
-        release_type = self.releasetype.lower()
-
-        # Map streaming service types to RYM types
-        type_mapping = {
-            "ep": "ep",
-            "single": "single",
-            "compilation": "compilation",
-            "best of": "compilation",
-            "album": "album"
-        }
-
-        return type_mapping.get(release_type, "album")
-
-    async def enrich_with_rym(self, rym_service):
-        """Enrich this album metadata with RateYourMusic data using comprehensive fallback strategy.
-
-        Uses rym_descriptors as state indicator:
-        - None: Not yet searched
-        - []: Searched but not found
-        - [...]: Searched and found with descriptors
-        """
-        # Skip if already enriched (rym_descriptors is not None means we already tried)
-        if self.rym_descriptors is not None:
-            logger.debug(f"RYM enrichment already attempted for: {self.albumartist} - {self.album}")
-            return
-
-        if not rym_service:
-            return
-
-        try:
-            # Parse year as integer
-            year = None
-            if self.year and self.year != "Unknown":
-                try:
-                    year = int(self.year)
-                except ValueError:
-                    year = None
-
-            # Determine album type from streaming metadata
-            album_type = self._get_rym_album_type()
-
-            # Single call with comprehensive fallback built-in
-            # (album search with optimized flow → artist fallback if needed)
-            rym_metadata = await rym_service.get_release_metadata(
-                self.albumartist, self.album, year, album_type
-            )
-
-            if rym_metadata:
-                # Log what type of metadata we got for debugging
-                if hasattr(rym_metadata, 'album') and rym_metadata.album:
-                    logger.debug(f"RYM album enrichment: {self.albumartist} - {self.album}")
-                else:
-                    logger.debug(f"RYM artist fallback enrichment: {self.albumartist} - {self.album}")
-
-                # Apply genre enrichment policy through service
-                self.genre = rym_service.enrich_genres(self.genre, rym_metadata)
-
-                # Add descriptors directly from RYM metadata object
-                if rym_metadata.descriptors:
-                    self.rym_descriptors = rym_metadata.descriptors
-                else:
-                    # Found metadata but no descriptors
-                    self.rym_descriptors = []
-            else:
-                # No metadata found - mark as searched with empty list
-                self.rym_descriptors = []
-                logger.debug(f"RYM enrichment found no results for: {self.albumartist} - {self.album}")
-
-        except Exception as e:
-            # Even on error, mark as attempted to avoid retrying on every track
-            self.rym_descriptors = []
-            logger.debug(f"Failed to enrich {self.albumartist} - {self.album} with RYM data: {e}")
 
     def get_copyright(self) -> str | None:
         if self.copyright is None:
@@ -238,16 +154,6 @@ class AlbumMetadata:
         releasetype = type_mapper.get(raw_type.lower(), str(raw_type).title())
         originaldate = resp.get("release_date_original")
         media_type = "Digital Media"  # MusicBrainz standard for digital/streaming sources
-        
-        # Source platform identification
-        source_platform = "qobuz"
-        source_album_id = item_id
-        # Get first artist ID for source_artist_id
-        source_artist_id = None
-        if artists:
-            source_artist_id = str(artists[0]["id"])
-        elif resp.get("artist", {}).get("id"):
-            source_artist_id = str(resp["artist"]["id"])
 
         if sampling_rate and bit_depth:
             container = "FLAC"
@@ -284,9 +190,6 @@ class AlbumMetadata:
             lyrics=None,
             purchase_date=None,
             tracktotal=tracktotal,
-            source_platform=source_platform,
-            source_album_id=source_album_id,
-            source_artist_id=source_artist_id,
             barcode=barcode,
             releasetype=releasetype,
             originaldate=originaldate,
@@ -313,7 +216,6 @@ class AlbumMetadata:
         # Extract additional Deezer metadata - keep it simple
         bpm = None  # Album-level BPM typically not used, let tracks handle it
         barcode = resp.get("upc")  # Use standardized name
-        replaygain_album_gain = resp.get("gain")
         releasetype = resp.get("record_type")  # Use Vorbis standard name
         
         # Additional standard metadata
@@ -364,12 +266,8 @@ class AlbumMetadata:
             lyrics=None,
             purchase_date=None,
             tracktotal=tracktotal,
-            source_platform="deezer",
-            source_album_id=item_id,
-            source_artist_id=artist_id,
             bpm=bpm,
             barcode=barcode,
-            replaygain_album_gain=replaygain_album_gain,
             releasetype=releasetype,
             album_artist_credit=album_artist_credit,
             originaldate=originaldate,
@@ -461,7 +359,6 @@ class AlbumMetadata:
         if artists:
             # Get first artist as primary albumartist (MusicBrainz standard)
             albumartist = artists[0]["name"]
-            # Get first artist ID for source_artist_id
             artist_id = str(artists[0]["id"])
         else:
             albumartist = typed(safe_get(resp, "artist", "name", default=""), str)
@@ -555,9 +452,6 @@ class AlbumMetadata:
             lyrics=None,
             purchase_date=None,
             tracktotal=tracktotal,
-            source_platform="tidal",
-            source_album_id=item_id,
-            source_artist_id=artist_id,
             barcode=barcode,
             releasetype=releasetype,
             media_type=media_type,
@@ -584,7 +478,6 @@ class AlbumMetadata:
         if artists:
             # Get first artist as primary albumartist (MusicBrainz standard)
             albumartist = artists[0]["name"]
-            # Get first artist ID for source_artist_id
             artist_id = str(artists[0]["id"])
         else:
             albumartist = typed(
@@ -679,9 +572,6 @@ class AlbumMetadata:
             lyrics=None,
             purchase_date=None,
             tracktotal=tracktotal,
-            source_platform="tidal",
-            source_album_id=str(album_resp["id"]),
-            source_artist_id=artist_id,
             releasetype=releasetype,
             media_type=media_type,
         )

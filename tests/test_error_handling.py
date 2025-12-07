@@ -74,7 +74,6 @@ class TestErrorHandling:
         mock_config.session.downloads.max_connections = 1  # For worker pool
         mock_config.session.database.downloads_enabled = False
         mock_config.session.database.failed_downloads_enabled = False
-        mock_config.session.rym.enabled = False  # Disable RYM for test
 
         with (
             patch("streamrip.rip.main.QobuzClient"),

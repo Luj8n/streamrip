@@ -22,11 +22,9 @@ from ..media import (
     remove_artwork_tempdirs,
 )
 from ..metadata import SearchResults
-from ..metadata.rym_service import RymMetadataService
 from ..progress import clear_progress
 from .parse_url import parse_url
 from .prompter import get_prompter
-from rym import RYMMetadataScraper
 
 logger = logging.getLogger("streamrip")
 
@@ -63,26 +61,6 @@ class Main:
         self.worker_tasks: list[asyncio.Task] = []
         self.max_workers = config.session.downloads.max_connections
         self.shutdown_event = asyncio.Event()
-
-        # Initialize RYM service if enabled (singleton for session)
-        self.rym_service = None
-        self.rym_scraper = None
-        self.rym_semaphore = None
-        if config.session.rym.enabled:
-            try:
-                # Create shared scraper instance (browser not started yet)
-                rym_config = config.session.rym.get_rym_config(APP_DIR)
-                if rym_config:
-                    self.rym_scraper = RYMMetadataScraper(rym_config)
-                    # Create semaphore to limit concurrent RYM operations
-                    self.rym_semaphore = asyncio.Semaphore(self.max_workers)
-                    # Pass shared scraper to service instead of config
-                    self.rym_service = RymMetadataService(self.rym_scraper, config.session.rym)
-                    logger.info("RYM metadata enrichment enabled")
-                else:
-                    logger.warning("Failed to create RYM config")
-            except Exception as e:
-                logger.warning(f"Failed to initialize RYM service: {e}")
 
         self.database: db.Database
 
@@ -177,9 +155,6 @@ class Main:
 
     async def _process_download_task(self, task: DownloadTask):
         """Process a single download task (download + validate + tag).
-
-        Note: RYM enrichment is handled at the album level in process_single_item()
-        before tracks are queued, so no enrichment needed here.
         """
         # Resolve the track to get actual Track object
         track_media = await task.track.resolve()
@@ -310,18 +285,8 @@ class Main:
             download_tasks = set()
 
             async def process_single_item(media_item):
-                """Process a single album or track with RYM enrichment"""
+                """Process a single album or track"""
                 try:
-                    # RYM enrichment for albums and tracks (limited by semaphore)
-                    if hasattr(media_item, 'meta') and self.rym_service and self.rym_semaphore:
-                        async with self.rym_semaphore:
-                            # For albums, enrich the album metadata directly
-                            if hasattr(media_item.meta, 'enrich_with_rym'):
-                                await media_item.meta.enrich_with_rym(self.rym_service)
-                            # For tracks, enrich the album metadata within the track
-                            elif hasattr(media_item.meta, 'album') and hasattr(media_item.meta.album, 'enrich_with_rym'):
-                                await media_item.meta.album.enrich_with_rym(self.rym_service)
-
                     # Handle downloads based on media type
                     if hasattr(media_item, 'tracks'):
                         # For Albums: extract tracks and queue them individually
@@ -405,7 +370,7 @@ class Main:
         await self.stream_process_urls([url])
 
     async def stream_process_pending(self):
-        """Stream process all currently pending items with RYM enrichment.
+        """Stream process all currently pending items.
 
         This is used for search and ID commands that add items to pending
         without URLs.
@@ -420,18 +385,8 @@ class Main:
             download_tasks = set()
 
             async def process_single_item(media_item):
-                """Process a single album or track with RYM enrichment"""
+                """Process a single album or track"""
                 try:
-                    # RYM enrichment for albums and tracks (limited by semaphore)
-                    if hasattr(media_item, 'meta') and self.rym_service and self.rym_semaphore:
-                        async with self.rym_semaphore:
-                            # For albums, enrich the album metadata directly
-                            if hasattr(media_item.meta, 'enrich_with_rym'):
-                                await media_item.meta.enrich_with_rym(self.rym_service)
-                            # For tracks, enrich the album metadata within the track
-                            elif hasattr(media_item.meta, 'album') and hasattr(media_item.meta.album, 'enrich_with_rym'):
-                                await media_item.meta.album.enrich_with_rym(self.rym_service)
-
                     # Handle downloads based on media type
                     if hasattr(media_item, 'tracks'):
                         # For Albums: extract tracks and queue them individually
@@ -476,7 +431,7 @@ class Main:
             await self.stop_workers()
 
     async def stream_process_lastfm(self, playlist_url: str):
-        """Stream process a Last.fm playlist URL with RYM enrichment."""
+        """Stream process a Last.fm playlist URL."""
         c = self.config.session.lastfm
         client = await self.get_logged_in_client(c.source)
 
@@ -497,14 +452,8 @@ class Main:
         download_tasks = set()
 
         async def process_single_item(media_item):
-            """Process a single track with RYM enrichment"""
+            """Process a single track"""
             try:
-                # RYM enrichment for tracks (limited by semaphore)
-                if hasattr(media_item, 'meta') and hasattr(media_item.meta, 'enrich_with_rym'):
-                    if self.rym_service and self.rym_semaphore:
-                        async with self.rym_semaphore:
-                            await media_item.meta.enrich_with_rym(self.rym_service)
-
                 # Download the item
                 await media_item.rip()
                 return media_item
@@ -644,10 +593,6 @@ class Main:
             self.media.append(playlist)
 
     async def __aenter__(self):
-        # Start RYM scraper browser session if enabled
-        if self.rym_scraper:
-            await self.rym_scraper.__aenter__()
-            logger.debug("RYM scraper browser session started")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -655,11 +600,6 @@ class Main:
         for client in self.clients.values():
             if hasattr(client, "session"):
                 await client.session.close()
-
-        # Cleanup RYM scraper browser session
-        if self.rym_scraper:
-            await self.rym_scraper.__aexit__(exc_type, exc_val, exc_tb)
-            logger.debug("RYM scraper browser session cleaned up")
 
         # close global progress bar manager
         clear_progress()

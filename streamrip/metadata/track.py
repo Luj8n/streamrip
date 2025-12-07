@@ -37,13 +37,8 @@ class TrackMetadata:
     artists: list[str] | None = None  # All contributing artists (MusicBrainz standard)
     isrc: str | None = None
     lyrics: str | None = ""
-    source_platform: str | None = None  # e.g., "deezer", "tidal", "qobuz"
-    source_track_id: str | None = None  # Platform-specific track ID
-    source_album_id: str | None = None  # Platform-specific album ID
-    source_artist_id: str | None = None # Platform-specific artist ID
     # Additional Deezer tags
     bpm: int | None = None
-    replaygain_track_gain: str | None = None  # ReplayGain format: "+/-X.XX dB"
     # New standard tags
     track_artist_credit: str | None = None  # Different from track artist
     media_type: str | None = None  # "WEB" for streaming sources
@@ -79,12 +74,6 @@ class TrackMetadata:
         bit_depth = typed(resp.get("maximum_bit_depth"), int | None)
         sampling_rate = typed(resp.get("maximum_sampling_rate"), int | float | None)
         
-        # Extract ReplayGain data
-        replaygain_track_gain = None
-        audio_info = resp.get("audio_info", {})
-        if "replaygain_track_gain" in audio_info and audio_info["replaygain_track_gain"] is not None:
-            replaygain_track_gain = f"{audio_info['replaygain_track_gain']:+.2f} dB"
-        
         # Use pre-parsed performer roles from client
         parsed_roles = resp.get("_parsed_performer_roles", {})
         
@@ -108,12 +97,6 @@ class TrackMetadata:
         
         # Additional Qobuz metadata
         media_type = "Digital Media"  # MusicBrainz standard for digital/streaming sources
-        source_platform = "qobuz"
-        source_track_id = track_id
-        qobuz_album_id = resp.get("album", {}).get("qobuz_id")
-        source_album_id = str(qobuz_album_id) if qobuz_album_id else None
-        performer_id = resp.get("performer", {}).get("id")
-        source_artist_id = str(performer_id) if performer_id else None
         
         # Is the info included?
         explicit = False
@@ -138,11 +121,6 @@ class TrackMetadata:
             author=author,
             artists=artists,
             isrc=isrc,
-            source_platform=source_platform,
-            source_track_id=source_track_id,
-            source_album_id=source_album_id,
-            source_artist_id=source_artist_id,
-            replaygain_track_gain=replaygain_track_gain,
             media_type=media_type,
         )
 
@@ -172,7 +150,6 @@ class TrackMetadata:
         bpm = resp.get("bpm")
         if bpm == 0:
             bpm = None
-        replaygain_track_gain = resp.get("gain")
         bit_depth = 16
         sampling_rate = 44.1
         explicit = typed(resp["explicit_lyrics"], bool)
@@ -230,12 +207,7 @@ class TrackMetadata:
             author=author,
             artists=artists,
             isrc=isrc,
-            source_platform=album.source_platform,
-            source_track_id=track_id,
-            source_album_id=album.source_album_id,
-            source_artist_id=artist_id,
             bpm=bpm,
-            replaygain_track_gain=replaygain_track_gain,
             track_artist_credit=track_artist_credit,
             media_type=media_type,
         )
@@ -296,12 +268,10 @@ class TrackMetadata:
             all_artist_names = [a["name"] for a in tidal_artists]
             artist = all_artist_names[0]  # Primary artist (first one)
             artists = all_artist_names  # All artists
-            # Get first artist ID for source_artist_id
             artist_id = str(tidal_artists[0]["id"])
         else:
             artist = track["artist"]["name"]
             artists = [artist]  # Single artist list
-            # Get artist ID from single artist object
             artist_id = str(track["artist"]["id"])
 
         # Check if track is streamable from Tidal API
@@ -314,11 +284,6 @@ class TrackMetadata:
         bpm = track.get("bpm")
         if bpm == 0:
             bpm = None
-        
-        # Convert replayGain to standard format
-        replaygain_track_gain = None
-        if "replayGain" in track and track["replayGain"] is not None:
-            replaygain_track_gain = f"{track['replayGain']:+.2f} dB"
         
         # Standard streaming source metadata
         media_type = "Digital Media"  # MusicBrainz standard for digital/streaming sources
@@ -358,12 +323,7 @@ class TrackMetadata:
             artists=artists,
             isrc=isrc,
             lyrics=lyrics,
-            source_platform=album.source_platform,
-            source_track_id=item_id,
-            source_album_id=album.source_album_id,
-            source_artist_id=artist_id,
             bpm=bpm,
-            replaygain_track_gain=replaygain_track_gain,
             media_type=media_type,
         )
 
@@ -381,7 +341,7 @@ class TrackMetadata:
 
     def format_track_path(self, format_string: str) -> str:
         # Available keys: "tracknumber", "artist", "artists", "albumartist", "composer", "title",
-        # "explicit", "albumcomposer", "album", "source_platform", "container"
+        # "explicit", "albumcomposer", "album", "container"
         none_text = "Unknown"
         # artist = primary artist only (MusicBrainz standard)
         # artists = all artists comma-separated (MusicBrainz standard)
@@ -397,7 +357,6 @@ class TrackMetadata:
             "composer": self.composer or none_text,
             "explicit": " (Explicit) " if self.info.explicit else "",
             "album": self.album.album,
-            "source_platform": self.source_platform or none_text,
             "container": self.info.container or none_text,
         }
         return format_string.format(**info)
