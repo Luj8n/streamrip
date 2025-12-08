@@ -168,9 +168,14 @@ class Container(Enum):
                     tag = f"{int(tag):02}"
                 elif k == "artists":
                     # Handle multi-value artists for FLAC - return as list for mutagen
+                    # Skip if artists would be same as artist
                     if isinstance(tag, list):
+                        if len(tag) == 1 and tag[0] == meta.artist:
+                            continue
                         out.append((v, tag))  # Let mutagen handle the list natively
                     else:
+                        if str(tag) == meta.artist:
+                            continue
                         out.append((v, str(tag)))
                     continue
                 elif k == "genre":
@@ -195,6 +200,12 @@ class Container(Enum):
                 # Handle artists as TXXX with comma-separated values
                 artists = self._attr_from_meta(meta, k)
                 if artists is not None:
+                    # Skip if artists would be same as artist
+                    if isinstance(artists, list):
+                        if len(artists) == 1 and artists[0] == meta.artist:
+                            continue
+                    elif str(artists) == meta.artist:
+                        continue
                     text = ", ".join(artists) if isinstance(artists, list) else str(artists)
                     out.append((f"TXXX:{k.upper()}", text))
                 continue
@@ -239,6 +250,12 @@ class Container(Enum):
                 # Handle artists as MP4 freeform with byte encoding
                 artists = self._attr_from_meta(meta, k)
                 if artists is not None:
+                    # Skip if artists would be same as artist
+                    if isinstance(artists, list):
+                        if len(artists) == 1 and artists[0] == meta.artist:
+                            continue
+                    elif str(artists) == meta.artist:
+                        continue
                     text = ", ".join(artists) if isinstance(artists, list) else str(artists)
                     text = text.encode("utf-8")
                     out.append((v, text))
