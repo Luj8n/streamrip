@@ -124,7 +124,7 @@ class TrackMetadata:
             media_type=media_type,
         )
 
-    @classmethod  
+    @classmethod
     def from_deezer(cls, album: AlbumMetadata, resp) -> TrackMetadata:
         track_id = str(resp["id"])
         # Get first artist ID from contributors list
@@ -139,8 +139,18 @@ class TrackMetadata:
         available_indices = [i for i, q in enumerate(qualities) if q is not None]
         available_quality = max(available_indices) if available_indices else None
         
-        # Check if track is streamable based on readable field and available qualities
-        streamable = resp.get("readable", True) and available_quality is not None
+        # Check if track is streamable based on available qualities
+        # Note: Even if readable=False (geo-restriction), if qualities exist, we'll try anyway
+        # because the actual download might still work (Deezer API is often overly restrictive)
+        readable = resp.get("readable", True)
+        has_qualities = available_quality is not None
+        streamable = has_qualities  # Try if qualities exist, regardless of readable flag
+        
+        # Log more details if marked as not readable
+        if not readable and has_qualities:
+            logger.debug(f"Track {track_id}: readable=False but qualities available - will attempt download anyway")
+        elif not streamable:
+            logger.debug(f"Track {track_id} not streamable: readable={readable}, qualities={qualities}, available_quality={available_quality}")
         
         # Set default if no quality found
         if available_quality is None:

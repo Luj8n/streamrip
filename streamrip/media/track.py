@@ -215,7 +215,10 @@ class PendingTrack(Pending):
 
         # Check if track is streamable
         if not meta.info.streamable:
-            logger.error(f"Track '{meta.title}' by {meta.artist} (Album: {meta.album.album}) [{self.id}] not available for stream on {source}")
+            error_msg = f"Track '{meta.title}' by {meta.artist} (Album: {meta.album.album}) [{self.id}] not available for stream on {source}"
+            if source == "deezer":
+                error_msg += " (possible geo-restriction - track may show as available in web UI but API blocks downloads)"
+            logger.error(error_msg)
             self.db.set_failed(source, "track", self.id)
             return None
 
