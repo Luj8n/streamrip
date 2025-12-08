@@ -176,6 +176,7 @@ def test_sample_config_data_fields(sample_config_data):
             app_id="12345",
             quality=3,
             download_booklets=True,
+            lower_quality_if_not_available=True,
             secrets=["secret1", "secret2"],
         ),
         tidal=TidalConfig(
@@ -253,7 +254,7 @@ def test_sample_config_data_fields(sample_config_data):
             bit_depth=24,
             lossy_bitrate=320,
         ),
-        misc=MiscConfig(version="2.0", check_for_updates=True),
+        misc=MiscConfig(version="2.2.0"),
         _modified=False,
     )
     assert sample_config_data.downloads == test_config.downloads
