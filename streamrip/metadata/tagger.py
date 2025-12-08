@@ -26,7 +26,6 @@ MP4_KEYS = (
     r"aART",
     "\xa9wrt",  # composer
     "----:com.apple.iTunes:AUTHOR",  # author/songwriter
-    "\xa9day",
     "\xa9cmt",
     "desc",
     "purd",
@@ -60,7 +59,6 @@ MP3_KEYS = (
     id3.TPE2,  # type: ignore
     id3.TCOM,  # type: ignore
     id3.TEXT,  # author/lyricist/songwriter
-    id3.TYER,  # type: ignore
     id3.COMM,  # type: ignore
     id3.TIT1,  # description (content group)
     None,  # purchase_date (handled as TXXX)
@@ -85,7 +83,6 @@ MP3_KEYS = (
     id3.TDOR,  # originaldate
     None,  # media_type (handled as TXXX)
 )
-
 METADATA_TYPES = (
     "title",
     "artist",
@@ -94,7 +91,6 @@ METADATA_TYPES = (
     "albumartist",
     "composer",
     "author",
-    "year",
     "comment",
     "description",
     "purchase_date",
