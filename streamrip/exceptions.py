@@ -67,5 +67,13 @@ class NonStreamableError(Exception):
 
 
 
+class SkipTrackError(Exception):
+    """SkipTrackError.
+
+    Raised when a track should be skipped without retries.
+    For example, when quality requirements aren't met.
+    """
+
+
 class ConversionError(Exception):
     """ConversionError."""

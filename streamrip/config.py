@@ -35,6 +35,8 @@ class QobuzConfig:
     quality: int
     # This will download booklet pdfs that are included with some albums
     download_booklets: bool
+    # If the target quality is not available, fallback to best quality available
+    lower_quality_if_not_available: bool
     # Do not change
     secrets: list[str]
 

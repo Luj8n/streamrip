@@ -34,6 +34,8 @@ delete_invalid_files = true
 quality = 3
 # This will download booklet pdfs that are included with some albums
 download_booklets = true
+# If the target quality is not available, fallback to best quality available
+lower_quality_if_not_available = true
 
 # Authenticate to Qobuz using auth token? Value can be true/false only
 use_auth_token = false

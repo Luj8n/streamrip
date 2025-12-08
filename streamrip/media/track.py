@@ -8,7 +8,7 @@ from ..client import Client, Downloadable
 from ..config import Config
 from ..console import console
 from ..db import Database
-from ..exceptions import NonStreamableError
+from ..exceptions import NonStreamableError, SkipTrackError
 from ..filepath_utils import clean_filename
 from ..metadata import AlbumMetadata, Covers, TrackMetadata, tag_file
 from ..progress import add_title, get_progress_callback, remove_title
@@ -227,7 +227,7 @@ class PendingTrack(Pending):
         if meta.info.quality < requested_quality and not lower_quality_fallback:
             logger.error(f"Track '{meta.title}' by {meta.artist} (Album: {meta.album.album}) [{self.id}]: Quality {meta.info.quality} available but {requested_quality} requested - skipping due to lower_quality_if_not_available=false")
             self.db.set_failed(source, "track", self.id)
-            return None
+            raise SkipTrackError(f"Quality {meta.info.quality} available but {requested_quality} requested")
 
         # Select the quality to download: min of requested and available
         quality = min(requested_quality, meta.info.quality)

@@ -10,6 +10,7 @@ from ..download_task import DownloadTask
 from ..client import Client, DeezerClient, QobuzClient, SoundcloudClient, TidalClient
 from ..config import APP_DIR, Config
 from ..console import console
+from ..exceptions import SkipTrackError
 from ..media import (
     Media,
     Pending,
@@ -126,6 +127,11 @@ class Main:
                     # Process the download task
                     await self._process_download_task(task)
                     logger.debug(f"Worker {name} completed task successfully")
+
+                except SkipTrackError as e:
+                    # Track was intentionally skipped (e.g., quality requirements not met)
+                    # Don't retry these
+                    logger.debug(f"Worker {name} skipping task: {e}")
 
                 except Exception as e:
                     logger.error(f"Worker {name} task failed: {e}")
