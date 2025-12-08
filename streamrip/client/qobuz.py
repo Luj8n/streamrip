@@ -376,7 +376,7 @@ class QobuzClient(Client):
             raise NonStreamableError
 
         return BasicDownloadable(
-            self.session, stream_url, "flac" if quality > 1 else "mp3", source="qobuz"
+            self.session, stream_url, "flac" if quality > 1 else "mp3", source="qobuz", quality=quality
         )
 
     async def _paginate(

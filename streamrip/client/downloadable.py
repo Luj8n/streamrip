@@ -35,6 +35,42 @@ def generate_temp_path(url: str):
     )
 
 
+def get_quality_description(source: str, quality: int | None) -> str:
+    """Get human-readable quality description for a given source and quality level.
+    
+    Args:
+        source: The streaming service source (deezer, tidal, qobuz, soundcloud)
+        quality: The quality level (0-4 depending on source)
+    
+    Returns:
+        Human-readable quality description
+    """
+    if quality is None:
+        return "Unknown"
+    
+    source = source.lower()
+    
+    if source == "deezer":
+        quality_map = ["MP3 128kbps", "MP3 320kbps", "FLAC"]
+        return quality_map[quality] if 0 <= quality < len(quality_map) else f"Quality {quality}"
+    
+    elif source == "tidal":
+        quality_map = ["LOW (AAC 96kbps)", "HIGH (AAC 320kbps)", "LOSSLESS (FLAC 16-bit/44.1kHz)", "HI_RES (FLAC up to 24-bit/192kHz)"]
+        return quality_map[quality] if 0 <= quality < len(quality_map) else f"Quality {quality}"
+    
+    elif source == "qobuz":
+        quality_map = ["MP3 320kbps", "FLAC 16-bit/44.1kHz", "FLAC 24-bit/96kHz", "FLAC 24-bit/192kHz"]
+        # Qobuz uses 1-4 instead of 0-3
+        idx = quality - 1 if quality > 0 else 0
+        return quality_map[idx] if 0 <= idx < len(quality_map) else f"Quality {quality}"
+    
+    elif source == "soundcloud":
+        # SoundCloud typically has MP3 128kbps or original quality
+        return "MP3 128kbps" if quality == 0 else "Original (FLAC)"
+    
+    return f"Quality {quality}"
+
+
 async def fast_async_download(path, url, headers, callback):
     """Async download using thread pool to avoid blocking the event loop.
 
@@ -66,6 +102,7 @@ class Downloadable(ABC):
     extension: str
     source: str = "Unknown"
     _size_base: Optional[int] = None
+    quality: Optional[int] = None
 
     async def download(self, path: str, callback: Callable[[int], Any]):
         await self._download(path, callback)
@@ -102,12 +139,14 @@ class BasicDownloadable(Downloadable):
         url: str,
         extension: str,
         source: str | None = None,
+        quality: int | None = None,
     ):
         self.session = session
         self.url = url
         self.extension = extension
         self._size = None
         self.source: str = source or "Unknown"
+        self.quality = quality
 
     async def _download(self, path: str, callback):
         await fast_async_download(path, self.url, self.session.headers, callback)
@@ -218,9 +257,11 @@ class TidalDownloadable(Downloadable):
         url: str | list[str] | None,
         codec: str,
         restrictions,
+        quality: int | None = None,
     ):
         self.session = session
         self.source = "tidal"
+        self.quality = quality
         codec = codec.lower()
         if codec in ("flac", "mqa"):
             self.extension = "flac"
@@ -307,6 +348,8 @@ class SoundcloudDownloadable(Downloadable):
         self.session = session
         self.file_type = info["type"]
         self.source = "soundcloud"
+        # Set quality based on file type: 0 for mp3, 1 for original
+        self.quality = 0 if info["type"] == "mp3" else 1
         if self.file_type == "mp3":
             self.extension = "mp3"
         elif self.file_type == "original":

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from .. import converter
 from ..client import Client, Downloadable
+from ..client.downloadable import get_quality_description
 from ..config import Config
 from ..console import console
 from ..db import Database
@@ -149,7 +150,8 @@ class Track(Media):
             # Raise exception - let queue workers handle retry
             raise Exception(f"Audio validation failed: {validation_result.error_message}")
         else:
-            logger.info(f"Audio validation passed for '{self.meta.title}' by {self.meta.artist} (method: {validation_result.validation_method})")
+            quality_desc = get_quality_description(self.downloadable.source, self.downloadable.quality)
+            logger.info(f"Audio validation passed for '{self.meta.title}' by {self.meta.artist} [{quality_desc}] (method: {validation_result.validation_method})")
 
 
     async def _convert(self):

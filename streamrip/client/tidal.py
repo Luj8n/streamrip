@@ -231,6 +231,7 @@ class TidalClient(Client):
             url=url,
             codec=manifest_data["codecs"],
             restrictions=manifest_data.get("restrictions"),
+            quality=quality,
         )
 
     async def get_video_file_url(self, video_id: str) -> str:
