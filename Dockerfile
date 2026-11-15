@@ -1,5 +1,5 @@
 # Use Ubuntu base
-FROM lscr.io/linuxserver/baseimage-ubuntu:jammy
+FROM lscr.io/linuxserver/baseimage-ubuntu:noble
 
 ENV PUID=99 \
     PGID=100 \
@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-dev \
+    python3-venv \
     gcc \
     g++ \
     make \
@@ -25,20 +26,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cron \
     && rm -rf /var/lib/apt/lists/*
 
-# Layer 2: Python dependencies only (rebuilds when pyproject.toml changes)
+# Layer 2: Python dependencies only (rebuilds when the lockfile changes)
 # Copy only dependency declaration, not the entire codebase
-COPY pyproject.toml /app/
-RUN ln -s /usr/bin/python3 /usr/bin/python && \
+COPY pyproject.toml poetry.lock /app/
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN python3 -m venv "$VIRTUAL_ENV" && \
     cd /app && \
-    pip3 install --no-cache-dir poetry && \
-    poetry config virtualenvs.create false && \
-    poetry install --only main --no-root && \
-    pip3 uninstall -y poetry
+    python3 -m venv /tmp/poetry && \
+    /tmp/poetry/bin/pip install --no-cache-dir 'poetry>=2.2,<3' && \
+    POETRY_VIRTUALENVS_CREATE=false /tmp/poetry/bin/poetry install --only main --no-root && \
+    rm -rf /tmp/poetry
 
 # Layer 3: Streamrip code (changes frequently, rebuilds quickly)
 COPY . /app/
 RUN cd /app && \
-    pip3 install --no-cache-dir . && \
+    pip3 install --no-cache-dir --no-deps . && \
     # Cleanup build dependencies to reduce image size
     apt-get purge -y gcc g++ python3-dev && \
     apt-get autoremove -y && \
@@ -46,15 +49,16 @@ RUN cd /app && \
 
 # Layer 4: Runtime configuration
 # Save the real rip binary and create wrapper for permission handling
-RUN mv /usr/local/bin/rip /usr/local/bin/rip.bin && \
+RUN mv /opt/venv/bin/rip /opt/venv/bin/rip.bin && \
     printf '%s\n' \
       '#!/bin/bash' \
       'set -e' \
       'export HOME=/config' \
       'cd /downloads' \
-      'exec gosu ${PUID:-99}:${PGID:-100} env HOME=/config /usr/local/bin/rip.bin "$@"' \
+      'exec gosu ${PUID:-99}:${PGID:-100} env HOME=/config /opt/venv/bin/rip.bin "$@"' \
       > /usr/local/bin/rip && \
-    chmod +x /usr/local/bin/rip
+    chmod +x /usr/local/bin/rip && \
+    ln -s /usr/local/bin/rip /opt/venv/bin/rip
 
 # single job script used both at startup and daily; imports env via s6
 RUN mkdir -p /etc/periodic/daily && \
@@ -68,7 +72,8 @@ RUN mkdir -p /etc/periodic/daily && \
     chmod +x /etc/periodic/daily/rip-tidal
 
 # run once on container start
-RUN ln -s /etc/periodic/daily/rip-tidal /etc/cont-init.d/99-run-rip-once
+RUN mkdir -p /etc/cont-init.d && \
+    ln -s /etc/periodic/daily/rip-tidal /etc/cont-init.d/99-run-rip-once
 
 # cron setup (4 AM EDT daily) - Ubuntu uses /etc/cron.d/
 RUN printf '%s\n' \

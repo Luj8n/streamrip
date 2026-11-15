@@ -187,8 +187,9 @@ async def test_latest_streamrip_version_creates_session():
         mock_connector.return_value = MagicMock()
 
         # Setup mock responses for API calls
-        mock_session_instance = AsyncMock()
+        mock_session_instance = MagicMock()
         mock_client_session.return_value = mock_session_instance
+        mock_session_instance.__aenter__.return_value = mock_session_instance
 
         mock_context_manager = AsyncMock()
         mock_session_instance.get.return_value = mock_context_manager
@@ -198,12 +199,7 @@ async def test_latest_streamrip_version_creates_session():
 
         # Make sure the test doesn't actually wait
         with patch("streamrip.rip.cli.__version__", "1.0.0"):
-            # Run with SSL verification parameter
-            try:
-                await latest_streamrip_version(verify_ssl=False)
-            except Exception:
-                # We just need to ensure it doesn't raise TypeError for the verify_ssl parameter
-                pass
+            assert await latest_streamrip_version(verify_ssl=False) == ("1.0.0", None)
 
         # Verify get_aiohttp_connector_kwargs was called with verify_ssl=False
         mock_get_kwargs.assert_called_once_with(verify_ssl=False)
