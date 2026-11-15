@@ -110,7 +110,7 @@ class TidalClient(Client):
             if self.config.fetch_lyrics:
                 try:
                     resp = await self._api_request(
-                        f"tracks/{item_id!s}/lyrics", base="https://listen.tidal.com/v1"
+                        f"tracks/{item_id!s}/lyrics", base="https://tidal.com/v1"
                     )
 
                     # Use unsynced lyrics for MP3, synced for others (FLAC, OPUS, etc)

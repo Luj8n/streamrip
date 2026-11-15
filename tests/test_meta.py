@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from streamrip.metadata import AlbumMetadata, TrackMetadata
 
 with open("tests/qobuz_album_resp.json") as f:
@@ -24,8 +26,7 @@ def test_album_metadata_qobuz():
     assert m.album == "Rumours"
     assert m.albumartist == "Fleetwood Mac"
     assert m.year == "1977"
-    assert "Pop" in m.genre
-    assert "Rock" in m.genre
+    assert m.genre == ["Rock"]
     assert not m.covers.empty()
 
     assert m.albumcomposer == "Various Composers"
@@ -61,3 +62,31 @@ def test_track_metadata_qobuz():
     assert t.tracknumber == 9
     assert t.discnumber == 1
     assert t.composer == "John Darnielle"
+
+
+@pytest.mark.parametrize(
+    ("genre", "genres_list", "expected"),
+    [
+        ({"name": "Classical"}, ["Classique"], {"Classical"}),
+        (None, ["Pop/Rock"], {"Pop", "Rock"}),
+        ({}, ["Pop/Rock"], {"Pop", "Rock"}),
+        ({"name": ""}, ["Pop/Rock"], {"Pop", "Rock"}),
+        (None, [], set()),
+    ],
+)
+def test_qobuz_genre_name_and_fallback(genre, genres_list, expected):
+    response = dict(qobuz_album_resp, genre=genre, genres_list=genres_list)
+    assert set(AlbumMetadata.from_qobuz(response).genre) == expected
+
+
+def test_qobuz_missing_genre():
+    response = qobuz_album_resp.copy()
+    response.pop("genre", None)
+    response.pop("genres_list", None)
+    assert AlbumMetadata.from_qobuz(response).genre == []
+
+
+def test_track_formatter_supports_id():
+    album = AlbumMetadata.from_qobuz(qobuz_track_resp["album"])
+    track = TrackMetadata.from_qobuz(album, qobuz_track_resp)
+    assert track.format_track_path("{id} - {title}") == "216020864 - Water Tower"

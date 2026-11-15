@@ -358,6 +358,7 @@ class TrackMetadata:
         artists_str = ", ".join(self.artists) if self.artists else self.artist
         
         info = {
+            "id": self.info.id,
             "title": self.title,
             "tracknumber": self.tracknumber,
             "artist": self.artist,  # Primary artist only
