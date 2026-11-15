@@ -122,6 +122,25 @@ MP4_KEY = dict(zip(METADATA_TYPES, MP4_KEYS))
 MP3_KEY = dict(zip(METADATA_TYPES, MP3_KEYS))
 
 
+FLAC_KEY.update({name: name.upper() for name in ("albumartists", "work", "credits", "explicit")})
+MP4_KEY.update({
+    "date": "\xa9day",
+    "label": "----:com.apple.iTunes:LABEL",
+    "albumartists": "----:com.apple.iTunes:ALBUMARTISTS",
+    "work": "----:com.apple.iTunes:WORK",
+    "credits": "----:com.apple.iTunes:CREDITS",
+    "explicit": "rtng",
+})
+MP3_KEY.update({
+    "date": id3.TDRC,
+    "description": None,
+    "albumartists": None,
+    "work": None,
+    "credits": None,
+    "explicit": None,
+})
+
+
 class Container(Enum):
     FLAC = 1
     AAC = 2
@@ -152,178 +171,86 @@ class Container(Enum):
 
     def _tag_flac(self, meta: TrackMetadata) -> list[tuple]:
         out = []
-        for k, v in FLAC_KEY.items():
-            tag = self._attr_from_meta(meta, k)
-            if tag:
-                if k in {
-                    "tracknumber",
-                    "discnumber",
-                    "tracktotal",
-                    "disctotal",
-                }:
-                    tag = f"{int(tag):02}"
-                elif k == "artists":
-                    # Handle multi-value artists for FLAC - return as list for mutagen
-                    # Skip if artists would be same as artist
-                    if isinstance(tag, list):
-                        if len(tag) == 1 and tag[0] == meta.artist:
-                            continue
-                        out.append((v, tag))  # Let mutagen handle the list natively
-                    else:
-                        if str(tag) == meta.artist:
-                            continue
-                        out.append((v, str(tag)))
-                    continue
-                elif k == "genre":
-                    # Handle multi-value genres for FLAC - return as list for mutagen
-                    if isinstance(tag, list):
-                        out.append((v, tag))  # Let mutagen handle the list natively
-                    else:
-                        out.append((v, str(tag)))
-                    continue
-                
-                out.append((v, str(tag)))
+        for name, key in FLAC_KEY.items():
+            value = self._attr_from_meta(meta, name)
+            if value is None or value == "" or value == []:
+                continue
+            if name in {"tracknumber", "discnumber", "tracktotal", "disctotal"}:
+                value = f"{int(value):02}"
+            elif isinstance(value, bool):
+                value = str(int(value))
+            elif not isinstance(value, list):
+                value = str(value)
+            out.append((key, value))
         return out
 
     def _tag_mp3(self, meta: TrackMetadata):
         out = []
-        for k, v in MP3_KEY.items():
-            if k == "tracknumber":
-                text = f"{meta.tracknumber}/{meta.album.tracktotal}"
-            elif k == "discnumber":
-                text = f"{meta.discnumber}/{meta.album.disctotal}"
-            elif k == "artists":
-                # Handle artists as TXXX with comma-separated values
-                artists = self._attr_from_meta(meta, k)
-                if artists is not None:
-                    # Skip if artists would be same as artist
-                    if isinstance(artists, list):
-                        if len(artists) == 1 and artists[0] == meta.artist:
-                            continue
-                    elif str(artists) == meta.artist:
-                        continue
-                    text = ", ".join(artists) if isinstance(artists, list) else str(artists)
-                    out.append((f"TXXX:{k.upper()}", text))
+        for name, frame in MP3_KEY.items():
+            if name in {"tracktotal", "disctotal"}:
                 continue
-            elif k in ["upc", "releasetype", "track_artist_credit", "album_artist_credit", "media_type", "purchase_date", "originaldate"]:
-                # Handle as TXXX custom tags
-                text = self._attr_from_meta(meta, k)
-                if text is not None:
-                    # Use singular form for RYM descriptor tag (following tag convention)
-                    tag_key = "RYM_DESCRIPTOR" if k == "rym_descriptors" else k.upper()
-                    out.append((f"TXXX:{tag_key}", str(text)))
+            value = self._attr_from_meta(meta, name)
+            if name == "tracknumber":
+                value = f"{meta.tracknumber}/{meta.album.tracktotal}"
+            elif name == "discnumber":
+                value = f"{meta.discnumber}/{meta.album.disctotal}"
+            if value is None or value == "" or value == []:
                 continue
+            if isinstance(value, bool):
+                value = str(int(value))
+            if frame is None:
+                out.append((f"TXXX:{name.upper()}", value))
             else:
-                text = self._attr_from_meta(meta, k)
-
-            if text is not None and v is not None:
-                out.append((v.__name__, v(encoding=3, text=text)))
+                out.append((frame.__name__, frame(encoding=3, text=value)))
         return out
 
     def _tag_mp4(self, meta: TrackMetadata):
         out = []
-        for k, v in MP4_KEY.items():
-            if k == "tracknumber":
-                text = [(meta.tracknumber, meta.album.tracktotal)]
-            elif k == "discnumber":
-                text = [(meta.discnumber, meta.album.disctotal)]
-            elif k == "bpm":
-                # BPM (tmpo) must be an integer for MP4 tags
-                bpm_value = self._attr_from_meta(meta, k)
-                if bpm_value is not None:
-                    try:
-                        text = [int(bpm_value)]
-                    except (ValueError, TypeError):
-                        text = None
-                else:
-                    text = None
-            elif k == "isrc" and meta.isrc is not None:
-                # because ISRC is an mp4 freeform value (not supported natively)
-                # we have to pass in the actual bytes to mutagen
-                # See mutagen.MP4Tags.__render_freeform
-                text = meta.isrc.encode("utf-8")
-            elif k == "artists" and v is not None:
-                # Handle artists as MP4 freeform with byte encoding
-                artists = self._attr_from_meta(meta, k)
-                if artists is not None:
-                    # Skip if artists would be same as artist
-                    if isinstance(artists, list):
-                        if len(artists) == 1 and artists[0] == meta.artist:
-                            continue
-                    elif str(artists) == meta.artist:
-                        continue
-                    text = ", ".join(artists) if isinstance(artists, list) else str(artists)
-                    text = text.encode("utf-8")
-                    out.append((v, text))
+        for name, key in MP4_KEY.items():
+            if key is None:
                 continue
-            elif k in ["upc", "releasetype", "track_artist_credit", "album_artist_credit", "originaldate", "media_type"] and v is not None:
-                # Handle custom MP4 freeform tags that need bytes encoding
-                text = self._attr_from_meta(meta, k)
-                if text is not None:
-                    text = str(text).encode("utf-8")
-                    out.append((v, text))
+            value = self._attr_from_meta(meta, name)
+            if value is None or value == "" or value == []:
                 continue
+            if name == "tracknumber":
+                value = [(meta.tracknumber, meta.album.tracktotal)]
+            elif name == "discnumber":
+                value = [(meta.discnumber, meta.album.disctotal)]
+            elif name == "bpm":
+                value = [int(float(value))]
+            elif name == "explicit":
+                value = [1 if value else 2]
+            elif name == "compilation":
+                value = str(value).lower() in {"true", "1"}
             else:
-                text = self._attr_from_meta(meta, k)
-
-            if v is not None and text is not None:
-                out.append((v, text))
+                values = value if isinstance(value, list) else [value]
+                value = [str(v).encode("utf-8") if key.startswith("----:") else str(v) for v in values]
+            out.append((key, value))
         return out
 
-    def _attr_from_meta(self, meta: TrackMetadata, attr: str) -> str | None:
-        # TODO: verify this works
-        in_trackmetadata = {
-            "title",
-            "album",
-            "artist",
-            "artists",
-            "tracknumber",
-            "discnumber",
-            "composer",
-            "author",
-            "isrc",
-            "lyrics",
-            # Track-specific additional metadata
-            "bpm",
-            "track_artist_credit",
-            "media_type",
-        }
-        if attr in in_trackmetadata:
-            if attr == "album":
-                return meta.album.album
-            elif attr == "artist":
-                # Return primary artist only (string)
-                return getattr(meta, attr)
-            elif attr == "artists":
-                # Return all artists as list for format handlers to process
-                return getattr(meta, attr)
-            val = getattr(meta, attr)
-            if val is None:
-                return None
-            return str(val)
-        else:
-            if attr == "genre":
-                # Return genres as list for FLAC to support multiple genre tags
-                return meta.album.genre
-            elif attr == "copyright":
-                return meta.album.get_copyright()
-            elif attr == "label":
-                return meta.album.info.label
-            val = getattr(meta.album, attr)
-            if val is None:
-                return None
-            return str(val)
+    def _attr_from_meta(self, meta: TrackMetadata, attr: str):
+        if attr == "album":
+            return meta.album.album
+        if attr == "label":
+            return meta.album.info.label
+        if attr in {"work", "explicit"}:
+            return getattr(meta.info, attr)
+        if attr in {
+            "title", "artist", "artists", "tracknumber", "discnumber",
+            "composer", "author", "isrc", "lyrics", "bpm",
+            "track_artist_credit", "media_type", "credits",
+        }:
+            return getattr(meta, attr)
+        return getattr(meta.album, attr)
 
     def tag_audio(self, audio, tags: list[tuple]):
-        for k, v in tags:
-            if k.startswith("TXXX:"):
-                # Handle TXXX frames for custom tags
-                description = k.split(":", 1)[1]
-                txxx = id3.TXXX(encoding=3, desc=description, text=v)
-                audio.add(txxx)
+        for key, value in tags:
+            if key.startswith("TXXX:"):
+                audio.add(id3.TXXX(encoding=3, desc=key.split(":", 1)[1], text=value))
+            elif self == Container.MP3:
+                audio.add(value)
             else:
-                # Handle regular tags
-                audio[k] = v
+                audio[key] = value
 
     async def embed_cover(self, audio, cover_path):
         if self == Container.FLAC:
@@ -354,10 +281,10 @@ class Container(Enum):
         elif self == Container.AAC:
             audio.save()
         elif self == Container.MP3:
-            audio.save(path, "v2_version=3")
+            audio.save(path, v2_version=4)
 
 
-async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
+async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None, exclude=()):
     ext = path.split(".")[-1].lower()
     if ext == "flac":
         container = Container.FLAC
@@ -371,7 +298,15 @@ async def tag_file(path: str, meta: TrackMetadata, cover_path: str | None):
     audio = container.get_mutagen_class(path)
     tags = container.get_tag_pairs(meta)
     logger.debug("Tagging with %s", tags)
-    container.tag_audio(audio, tags)
+    excluded = {name.lower() for name in exclude}
+    keys = {Container.FLAC: FLAC_KEY, Container.AAC: MP4_KEY, Container.MP3: MP3_KEY}[container]
+    excluded_keys = set()
+    for name in excluded:
+        if name not in keys:
+            continue
+        key = keys[name]
+        excluded_keys.add((key.__name__ if key else f"TXXX:{name.upper()}") if container == Container.MP3 else key)
+    container.tag_audio(audio, [(key, value) for key, value in tags if key not in excluded_keys])
     if cover_path is not None:
         await container.embed_cover(audio, cover_path)
     container.save_audio(audio, path)

@@ -228,6 +228,7 @@ async def file(ctx, path):
                     await main.add_all_by_id(
                         [(i["source"], i["media_type"], i["id"]) for i in items]
                     )
+                    await main.stream_process_pending()
                 else:
                     s = set(items)
                     if len(s) < len(items):
@@ -322,6 +323,7 @@ def database_browse(ctx, table):
         t = Table(title="Downloads database")
         t.add_column("Row")
         t.add_column("ID")
+        t.add_column("Source")
         for i, row in enumerate(downloads.all()):
             t.add_row(f"{i:02}", *row)
         console.print(t)

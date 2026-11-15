@@ -1,7 +1,10 @@
-import asyncio
 import logging
 import os
-from dataclasses import dataclass
+import shutil
+import tempfile
+from dataclasses import dataclass, replace
+
+from mutagen import File
 
 from .. import converter
 from ..client import Client, Downloadable
@@ -10,11 +13,11 @@ from ..config import Config
 from ..console import console
 from ..db import Database
 from ..exceptions import NonStreamableError, SkipTrackError
-from ..filepath_utils import clean_filename
+from ..filepath_utils import clean_filename, clean_filepath
 from ..metadata import AlbumMetadata, Covers, TrackMetadata, tag_file
 from ..progress import add_title, get_progress_callback, remove_title
 from ..utils.audio_validator import validate_audio_file
-from .artwork import download_artwork
+from .artwork import artwork_tempdir, download_artwork
 from .media import Media, Pending
 
 logger = logging.getLogger("streamrip")
@@ -32,6 +35,77 @@ class Track(Media):
     # change?
     download_path: str = ""
     is_single: bool = False
+    organize_by_album: bool = False
+
+    async def rip(self):
+        await self.preprocess()
+        try:
+            if self.config.session.cli.dry_run:
+                await self.download()
+                return
+            destination = self.download_path
+            initial_folder = self.folder
+            # Keep the old file until validation, tags and conversion all succeed.
+            staging = tempfile.mkdtemp(prefix=".streamrip-", dir=self.folder)
+            completed = False
+            try:
+                self.download_path = os.path.join(staging, os.path.basename(destination))
+                await self.download()
+                await self.postprocess()
+                staged_path = self.download_path
+                extension = os.path.splitext(staged_path)[1][1:]
+                if self.organize_by_album:
+                    self._set_album_folder_from_audio()
+                os.makedirs(self.folder, exist_ok=True)
+                self.meta.info.container = extension.upper()
+                self._set_download_path(extension)
+                os.replace(staged_path, self.download_path)
+                completed = True
+            finally:
+                if completed or self.config.session.downloads.delete_invalid_files:
+                    shutil.rmtree(staging)
+                    if completed and initial_folder != self.folder:
+                        try:
+                            os.rmdir(initial_folder)
+                        except OSError:
+                            pass  # Other tracks may still be using this directory.
+                else:
+                    logger.warning("Kept incomplete download in %s", staging)
+            self.db.set_downloaded(self.meta.info.id, self.downloadable.source)
+        finally:
+            if self.is_single:
+                remove_title(self.meta.title)
+
+    def _set_album_folder_from_audio(self):
+        audio = File(self.download_path)
+        if audio is None:
+            raise ValueError("Cannot determine downloaded audio properties")
+        container = os.path.splitext(self.download_path)[1][1:].upper()
+        lossless = container == "FLAC" or getattr(audio.info, "codec", None) == "alac"
+        info = replace(
+            self.meta.album.info,
+            container=container,
+            bit_depth=(getattr(audio.info, "bits_per_sample", None) or None) if lossless else None,
+            sampling_rate=audio.info.sample_rate / 1000,
+        )
+        album = replace(self.meta.album, info=info)
+        config = self.config.session
+        parent = config.downloads.folder
+        if config.downloads.source_subdirectories:
+            parent = os.path.join(parent, self.downloadable.source.capitalize())
+        folder = os.path.join(parent, clean_filepath(
+            album.format_folder_path(config.filepaths.folder_format),
+            config.filepaths.restrict_characters,
+        ))
+        os.makedirs(folder, exist_ok=True)
+        if config.artwork.save_artwork and not album.covers.empty():
+            _, _, saved_cover = album.covers.largest()
+            target = os.path.join(folder, "cover.jpg")
+            if saved_cover and os.path.abspath(saved_cover) != os.path.abspath(target):
+                shutil.copyfile(saved_cover, target)
+        if config.downloads.disc_subdirectories and album.disctotal > 1:
+            folder = os.path.join(folder, f"Disc {self.meta.discnumber}")
+        self.folder = folder
 
     async def preprocess(self):
         self._set_download_path()
@@ -45,39 +119,12 @@ class Track(Media):
             await self._print_dry_run_info()
             return
 
-        # TODO: progress bar description
-        # Note: Concurrency now managed by worker pool, no semaphore needed
         with get_progress_callback(
             self.config.session.cli.progress_bars,
             await self.downloadable.size(),
             f"Track {self.meta.tracknumber}",
         ) as callback:
-            try:
-                await self.downloadable.download(self.download_path, callback)
-                retry = False
-            except Exception as e:
-                    logger.error(
-                        f"Error downloading track '{self.meta.title}', retrying: {e}"
-                    )
-                    retry = True
-
-            if not retry:
-                return
-
-            with get_progress_callback(
-                self.config.session.cli.progress_bars,
-                await self.downloadable.size(),
-                f"Track {self.meta.tracknumber} (retry)",
-            ) as callback:
-                try:
-                    await self.downloadable.download(self.download_path, callback)
-                except Exception as e:
-                    logger.error(
-                        f"Persistent error downloading track '{self.meta.title}', skipping: {e}"
-                    )
-                    self.db.set_failed(
-                        self.downloadable.source, "track", self.meta.info.id
-                    )
+            await self.downloadable.download(self.download_path, callback)
 
     async def _print_dry_run_info(self):
         """Print track information for dry run mode."""
@@ -90,7 +137,7 @@ class Track(Media):
         quality_info = f"Quality: {self.meta.info.quality}"
         if hasattr(self.meta.info, 'bit_depth') and hasattr(self.meta.info, 'sampling_rate'):
             if self.meta.info.bit_depth and self.meta.info.sampling_rate:
-                quality_info += f" ({self.meta.info.bit_depth}-bit/{self.meta.info.sampling_rate//1000}kHz)"
+                quality_info += f" ({self.meta.info.bit_depth}-bit/{self.meta.info.sampling_rate}kHz)"
 
         console.print(f"[cyan]Would download:[/cyan] [bold]{self.meta.title}[/bold]")
         console.print(f"  Artist: {self.meta.artist}")
@@ -106,9 +153,6 @@ class Track(Media):
         console.print("")
 
     async def postprocess(self):
-        if self.is_single:
-            remove_title(self.meta.title)
-
         if self.config.session.cli.dry_run:
             return
 
@@ -116,11 +160,10 @@ class Track(Media):
         if self.config.session.downloads.validate_audio:
             await self._validate_audio_file()
 
-        await tag_file(self.download_path, self.meta, self.cover_path)
+        await tag_file(self.download_path, self.meta, self.cover_path, self.config.session.metadata.exclude)
         if self.config.session.conversion.enabled:
             await self._convert()
 
-        self.db.set_downloaded(self.meta.info.id)
 
     async def _validate_audio_file(self):
         """Validate the downloaded audio file for corruption."""
@@ -147,8 +190,9 @@ class Track(Media):
                 except OSError as e:
                     logger.warning(f"Failed to delete invalid file {self.download_path}: {e}")
 
-            # Raise exception - let queue workers handle retry
-            raise Exception(f"Audio validation failed: {validation_result.error_message}")
+            if not self.config.session.downloads.retry_on_validation_failure:
+                raise SkipTrackError(error_msg)
+            raise RuntimeError(error_msg)
         else:
             quality_desc = get_quality_description(self.downloadable.source, self.downloadable.quality)
             logger.info(f"Audio validation passed for '{self.meta.title}' by {self.meta.artist} [{quality_desc}] (method: {validation_result.validation_method})")
@@ -166,7 +210,7 @@ class Track(Media):
         await engine.convert()
         self.download_path = engine.final_fn  # because the extension changed
 
-    def _set_download_path(self):
+    def _set_download_path(self, extension: str | None = None):
         c = self.config.session.filepaths
         formatter = c.track_format
         track_path = clean_filename(
@@ -176,10 +220,9 @@ class Track(Media):
         if c.truncate_to > 0 and len(track_path) > c.truncate_to:
             track_path = track_path[: c.truncate_to]
 
-        self.download_path = os.path.join(
-            self.folder,
-            f"{track_path}.{self.downloadable.extension}",
-        )
+        extension = f".{extension or self.downloadable.extension}"
+        track_path = track_path.encode("utf-8")[:255 - len(extension.encode("utf-8"))].decode("utf-8", errors="ignore")
+        self.download_path = os.path.join(self.folder, f"{track_path}{extension}")
 
 
 @dataclass(slots=True)
@@ -194,7 +237,7 @@ class PendingTrack(Pending):
     cover_path: str | None
 
     async def resolve(self) -> Track | None:
-        if self.db.downloaded(self.id):
+        if self.db.downloaded(self.id, self.client.source):
             logger.info(
                 f"Skipping track {self.id}. Marked as downloaded in the database.",
             )
@@ -229,13 +272,13 @@ class PendingTrack(Pending):
         
         # meta.info.quality contains the highest available quality for this track
         # Now select the actual quality to download
-        if meta.info.quality < requested_quality and not lower_quality_fallback:
+        if self.client.source != "tidal" and meta.info.quality < requested_quality and not lower_quality_fallback:
             logger.error(f"Track '{meta.title}' by {meta.artist} (Album: {meta.album.album}) [{self.id}]: Quality {meta.info.quality} available but {requested_quality} requested - skipping due to lower_quality_if_not_available=false")
             self.db.set_failed(source, "track", self.id)
             raise SkipTrackError(f"Quality {meta.info.quality} available but {requested_quality} requested")
 
         # Select the quality to download: min of requested and available
-        quality = min(requested_quality, meta.info.quality)
+        quality = requested_quality if self.client.source == "tidal" else min(requested_quality, meta.info.quality)
         
         # Get downloadable info for the determined quality
         try:
@@ -250,6 +293,10 @@ class PendingTrack(Pending):
 
         # Update container format based on actual downloadable format
         meta.info.container = downloadable.extension.upper()
+        if self.client.source == "tidal":
+            meta.info.quality = downloadable.quality
+            meta.info.bit_depth = downloadable.bit_depth
+            meta.info.sampling_rate = downloadable.sampling_rate
 
         downloads_config = self.config.session.downloads
         if downloads_config.disc_subdirectories and self.album.disctotal > 1:
@@ -264,6 +311,7 @@ class PendingTrack(Pending):
             folder,
             self.cover_path,
             self.db,
+            organize_by_album=True,
         )
 
 
@@ -281,7 +329,7 @@ class PendingSingle(Pending):
     db: Database
 
     async def resolve(self) -> Track | None:
-        if self.db.downloaded(self.id):
+        if self.db.downloaded(self.id, self.client.source):
             logger.info(
                 f"Skipping track {self.id}. Marked as downloaded in the database.",
             )
@@ -294,7 +342,11 @@ class PendingSingle(Pending):
             return None
         # Patch for soundcloud
         try:
-            album = AlbumMetadata.from_track_resp(resp, self.client.source)
+            if self.client.source == "tidal":
+                album_resp = await self.client.get_metadata(str(resp["album"]["id"]), "album")
+                album = AlbumMetadata.from_album_resp(album_resp, "tidal")
+            else:
+                album = AlbumMetadata.from_track_resp(resp, self.client.source)
         except Exception as e:
             logger.error(f"Error building album metadata for track {id=}: {e}")
             return None
@@ -325,31 +377,27 @@ class PendingSingle(Pending):
         
         # meta.info.quality contains the highest available quality for this track
         # Now select the actual quality to download
-        if meta.info.quality < requested_quality and not lower_quality_fallback:
+        if self.client.source != "tidal" and meta.info.quality < requested_quality and not lower_quality_fallback:
             logger.error(f"Track '{meta.title}' by {meta.artist} (Album: {meta.album.album}) [{self.id}]: Quality {meta.info.quality} available but {requested_quality} requested - skipping due to lower_quality_if_not_available=false")
             self.db.set_failed(self.client.source, "track", self.id)
             return None
 
         # Select the quality to download: min of requested and available
-        quality = min(requested_quality, meta.info.quality)
+        quality = requested_quality if self.client.source == "tidal" else min(requested_quality, meta.info.quality)
         
-        config = self.config.session
-        parent = config.downloads.folder
-        if config.filepaths.add_singles_to_folder:
-            folder = self._format_folder(album)
-        else:
-            folder = parent
-
-        os.makedirs(folder, exist_ok=True)
-
-        embedded_cover_path, downloadable = await asyncio.gather(
-            self._download_cover(album.covers, folder),
-            self.client.get_downloadable(self.id, quality),
-        )
-        
-        # Update container format based on actual downloadable format
+        downloadable = await self.client.get_downloadable(self.id, quality)
         meta.info.container = downloadable.extension.upper()
-        
+        if self.client.source == "tidal":
+            meta.info.quality = album.info.quality = downloadable.quality
+            meta.info.bit_depth = album.info.bit_depth = downloadable.bit_depth
+            meta.info.sampling_rate = album.info.sampling_rate = downloadable.sampling_rate
+            album.info.container = meta.info.container
+
+        config = self.config.session
+        folder = self._format_folder(album) if config.filepaths.add_singles_to_folder else config.downloads.folder
+        os.makedirs(folder, exist_ok=True)
+        embedded_cover_path = await self._download_cover(album.covers, folder)
+
         return Track(
             meta,
             downloadable,
@@ -358,6 +406,7 @@ class PendingSingle(Pending):
             embedded_cover_path,
             self.db,
             is_single=True,
+            organize_by_album=self.config.session.filepaths.add_singles_to_folder,
         )
 
     def _format_folder(self, meta: AlbumMetadata) -> str:
@@ -367,12 +416,12 @@ class PendingSingle(Pending):
         if c.downloads.source_subdirectories:
             parent = os.path.join(parent, self.client.source.capitalize())
 
-        return os.path.join(parent, meta.format_folder_path(formatter))
+        return os.path.join(parent, clean_filepath(meta.format_folder_path(formatter), c.filepaths.restrict_characters))
 
     async def _download_cover(self, covers: Covers, folder: str) -> str | None:
         embed_path, _ = await download_artwork(
             self.client.session,
-            folder,
+            artwork_tempdir() if self.config.session.filepaths.add_singles_to_folder else folder,
             covers,
             self.config.session.artwork,
             for_playlist=False,

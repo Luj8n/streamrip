@@ -23,10 +23,10 @@ class AudioValidator:
     def __init__(self):
         # Check available validation tools on initialization
         self.flac_available = shutil.which("flac") is not None
-        self.ffprobe_available = shutil.which("ffprobe") is not None
+        self.ffmpeg_available = shutil.which("ffmpeg") is not None
 
-        if not self.ffprobe_available:
-            logger.warning("ffprobe not found - audio validation will be limited")
+        if not self.ffmpeg_available:
+            logger.warning("ffmpeg not found - audio validation will be limited")
 
     async def validate_audio_file(self, file_path: str) -> ValidationResult:
         """Validate an audio file for corruption and integrity.
@@ -46,26 +46,26 @@ class AudioValidator:
 
         file_extension = Path(file_path).suffix.lower()
 
-        # For FLAC files, try flac tool first, then fallback to ffprobe
+        # For FLAC files, try flac tool first, then fallback to ffmpeg
         if file_extension == ".flac":
             if self.flac_available:
                 result = await self._validate_with_flac_tool(file_path)
                 if result.is_valid or result.validation_method == "flac_tool":
                     return result
-                # If flac tool failed to run, fallback to ffprobe
+                # If flac tool failed to run, fallback to ffmpeg
 
-            # Fallback to ffprobe for FLAC files
-            if self.ffprobe_available:
-                return await self._validate_with_ffprobe(file_path)
+            # Fallback to ffmpeg for FLAC files
+            if self.ffmpeg_available:
+                return await self._validate_with_ffmpeg(file_path)
 
-        # For all other formats, use ffprobe
-        elif self.ffprobe_available:
-            return await self._validate_with_ffprobe(file_path)
+        # For all other formats, use ffmpeg
+        elif self.ffmpeg_available:
+            return await self._validate_with_ffmpeg(file_path)
 
         # No validation tools available
         logger.warning(f"No validation tools available for {file_path}")
         return ValidationResult(
-            is_valid=True,  # Assume valid if we can't validate
+            is_valid=False,
             error_message="No validation tools available",
             validation_method="none"
         )
@@ -114,8 +114,8 @@ class AudioValidator:
                 validation_method="flac_tool_error"
             )
 
-    async def _validate_with_ffprobe(self, file_path: str) -> ValidationResult:
-        """Validate audio file using ffprobe.
+    async def _validate_with_ffmpeg(self, file_path: str) -> ValidationResult:
+        """Validate audio file using ffmpeg.
 
         Args:
             file_path: Path to the audio file
@@ -124,61 +124,25 @@ class AudioValidator:
             ValidationResult with validation status
         """
         try:
-            logger.debug(f"Validating audio file with ffprobe: {file_path}")
-
-            # ffprobe with error detection - tries to read the entire file
             process = await asyncio.create_subprocess_exec(
-                "ffprobe",
-                "-v", "error",  # Only show errors
-                "-show_entries", "format=duration",  # Show duration to force full read
-                "-of", "csv=p=0",  # Simple output format
-                file_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                "ffmpeg", "-v", "error", "-xerror", "-i", file_path,
+                "-map", "0:a:0", "-f", "null", "-",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
-
-            stdout, stderr = await process.communicate()
-
-            if process.returncode == 0:
-                # Additional check: ensure we got a valid duration
-                duration_output = stdout.decode('utf-8').strip()
-                try:
-                    duration = float(duration_output)
-                    if duration > 0:
-                        logger.debug(f"Audio validation passed: {file_path} (duration: {duration:.2f}s)")
-                        return ValidationResult(
-                            is_valid=True,
-                            validation_method="ffprobe"
-                        )
-                    else:
-                        return ValidationResult(
-                            is_valid=False,
-                            error_message="Audio file has zero duration",
-                            validation_method="ffprobe"
-                        )
-                except ValueError:
-                    # Duration not parseable, but ffprobe succeeded - file might still be valid
-                    logger.debug(f"Audio validation passed but duration unparseable: {file_path}")
-                    return ValidationResult(
-                        is_valid=True,
-                        validation_method="ffprobe"
-                    )
-            else:
-                error_msg = stderr.decode('utf-8').strip() if stderr else "Unknown ffprobe error"
-                logger.error(f"Audio validation failed for {file_path}: {error_msg}")
-                return ValidationResult(
-                    is_valid=False,
-                    error_message=f"ffprobe validation failed: {error_msg}",
-                    validation_method="ffprobe"
-                )
-
-        except Exception as e:
-            logger.debug(f"Error running ffprobe for {file_path}: {e}")
+            try:
+                _, stderr = await process.communicate()
+            except asyncio.CancelledError:
+                process.kill()
+                await process.wait()
+                raise
+            error = stderr.decode("utf-8", errors="replace").strip()
             return ValidationResult(
-                is_valid=False,
-                error_message=f"Failed to run ffprobe: {str(e)}",
-                validation_method="ffprobe_error"
+                process.returncode == 0 and not error,
+                error or None, "ffmpeg",
             )
+        except OSError as e:
+            return ValidationResult(False, str(e), "ffmpeg_error")
 
 
 # Global validator instance

@@ -16,7 +16,6 @@ from typing import Any, Callable, Optional
 import aiofiles
 import aiohttp
 import m3u8
-import requests
 from Cryptodome.Cipher import Blowfish
 
 from .. import converter
@@ -71,28 +70,26 @@ def get_quality_description(source: str, quality: int | None) -> str:
     return f"Quality {quality}"
 
 
-async def fast_async_download(path, url, headers, callback):
-    """Async download using thread pool to avoid blocking the event loop.
+async def fast_async_download(path, url, session, callback):
+    """Stream through the client's configured HTTP session, publishing atomically."""
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=60)
+    async with session.get(url, allow_redirects=True, timeout=timeout, max_headers=256) as response:
+        await _save_response(path, response, callback)
 
-    Uses asyncio.to_thread to avoid blocking the event loop during the initial
-    HTTP connection and file I/O, while still maintaining efficient chunked downloads.
-    """
-    chunk_size: int = 2**17  # 131 KB
-    
-    def _sync_download():
-        with open(path, "wb") as file:
-            with requests.get(
-                url,
-                headers=headers,
-                allow_redirects=True,
-                stream=True,
-            ) as resp:
-                for chunk in resp.iter_content(chunk_size=chunk_size):
-                    file.write(chunk)
-                    callback(len(chunk))
-    
-    # Run the synchronous download in a thread to avoid blocking
-    await asyncio.to_thread(_sync_download)
+
+async def _save_response(path, response, callback):
+    response.raise_for_status()
+    fd, temporary = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)))
+    os.close(fd)
+    try:
+        async with aiofiles.open(temporary, "wb") as file:
+            async for chunk in response.content.iter_chunked(2**17):
+                await file.write(chunk)
+                callback(len(chunk))
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
 
 
 @dataclass(slots=True)
@@ -111,7 +108,7 @@ class Downloadable(ABC):
         if hasattr(self, "_size") and self._size is not None:
             return self._size
 
-        async with self.session.head(self.url) as response:
+        async with self.session.head(self.url, max_headers=256) as response:
             response.raise_for_status()
             content_length = response.headers.get("Content-Length", 0)
             self._size = int(content_length)
@@ -149,7 +146,7 @@ class BasicDownloadable(Downloadable):
         self.quality = quality
 
     async def _download(self, path: str, callback):
-        await fast_async_download(path, self.url, self.session.headers, callback)
+        await fast_async_download(path, self.url, self.session, callback)
 
 
 class DeezerDownloadable(Downloadable):
@@ -169,7 +166,6 @@ class DeezerDownloadable(Downloadable):
         self._size_base = None
 
     async def _download(self, path: str, callback):
-        # with requests.Session().get(self.url, allow_redirects=True) as resp:
         async with self.session.get(self.url, allow_redirects=True) as resp:
             resp.raise_for_status()
             self._size = int(resp.headers.get("Content-Length", 0))
@@ -187,9 +183,7 @@ class DeezerDownloadable(Downloadable):
 
             if self.is_encrypted.search(self.url) is None:
                 logger.debug(f"Deezer file at {self.url} not encrypted.")
-                await fast_async_download(
-                    path, self.url, self.session.headers, callback
-                )
+                await _save_response(path, resp, callback)
             else:
                 blowfish_key = self._generate_blowfish_key(self.id)
                 logger.debug(
@@ -300,6 +294,7 @@ class TidalDownloadable(Downloadable):
     async def _download_segments(self, path: str, callback):
         """Download DASH segments and concatenate them."""
         segment_paths = []
+        combined_path = generate_temp_path(path)
 
         try:
             # Download all segments
@@ -315,15 +310,29 @@ class TidalDownloadable(Downloadable):
                         callback(len(content))
 
             # Concatenate all segments into final file
-            async with aiofiles.open(path, "wb") as outfile:
+            async with aiofiles.open(combined_path, "wb") as outfile:
                 for segment_path in segment_paths:
                     async with aiofiles.open(segment_path, "rb") as infile:
                         content = await infile.read()
                         await outfile.write(content)
 
+            # Tidal DASH carries FLAC inside MP4; remux without re-encoding audio.
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-v", "error", "-y",
+                "-i", combined_path,
+                "-map", "0:a:0",
+                "-c:a", "copy",
+                "-f", "flac" if self.extension == "flac" else "mp4",
+                path,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, error = await process.communicate()
+            if process.returncode:
+                raise NonStreamableError(f"Tidal DASH remux failed: {error.decode()}")
+
         finally:
             # Clean up temporary segment files
-            for segment_path in segment_paths:
+            for segment_path in [*segment_paths, combined_path]:
                 try:
                     os.remove(segment_path)
                 except FileNotFoundError:

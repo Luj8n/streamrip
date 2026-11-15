@@ -1,3 +1,4 @@
+import os
 from string import printable
 
 from pathvalidate import sanitize_filename, sanitize_filepath  # type: ignore
@@ -25,4 +26,4 @@ def clean_filepath(fn: str, restrict: bool = False) -> str:
     if restrict:
         path = "".join(c for c in path if c in ALLOWED_CHARS)
 
-    return path
+    return os.sep.join(truncate_str(part) for part in path.split(os.sep))

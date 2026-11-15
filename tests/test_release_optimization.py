@@ -1,11 +1,12 @@
 """Tests for release-level skip optimization."""
 
-import tempfile
 import os
-from unittest.mock import Mock, AsyncMock
+import tempfile
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
-from streamrip.db import Database, Downloads, Failed, DownloadedReleases
+from streamrip.db import Database, DownloadedReleases, Downloads, Failed
 from streamrip.media.album import PendingAlbum
 from streamrip.media.artist import PendingArtist
 from streamrip.media.label import PendingLabel
@@ -133,3 +134,39 @@ class TestCoreReleaseOptimization:
         
         # Should return None when all albums are already downloaded
         assert result is None
+
+def test_history_migration_and_source_isolation(tmp_path):
+    import sqlite3
+
+    path = str(tmp_path / 'old.db')
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE downloads (id TEXT UNIQUE NOT NULL)')
+        conn.execute("INSERT INTO downloads VALUES ('123')")
+    downloads = Downloads(path)
+    assert downloads.all() == [('123', '')]
+    assert not downloads.contains(id='123', source='tidal')
+    downloads.add(('123', 'tidal'))
+    downloads.add(('123', 'deezer'))
+    downloads.add(('123', 'tidal'))
+    assert len(Downloads(path).all()) == 3
+    with sqlite3.connect(path) as conn:
+        assert conn.execute('SELECT * FROM downloads_legacy').fetchall() == [('123',)]
+
+    path = str(tmp_path / 'failed.db')
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE failed_downloads (source TEXT NOT NULL, media_type TEXT NOT NULL, id TEXT UNIQUE NOT NULL)')
+        conn.execute("INSERT INTO failed_downloads VALUES ('tidal', 'track', '123')")
+    failed = Failed(path)
+    failed.add(('deezer', 'track', '123'))
+    failed.add(('tidal', 'album', '123'))
+    failed.add(('tidal', 'track', '123'))
+    assert len(Failed(path).all()) == 3
+
+
+def test_success_clears_only_matching_failure(temp_database):
+    for source in ('tidal', 'deezer'):
+        temp_database.set_failed(source, 'track', '123')
+    temp_database.set_downloaded('123', 'tidal')
+    assert temp_database.downloaded('123', 'tidal')
+    assert not temp_database.downloaded('123', 'deezer')
+    assert temp_database.get_failed_downloads() == [('deezer', 'track', '123')]

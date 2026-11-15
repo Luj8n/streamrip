@@ -41,9 +41,10 @@ class PendingPlaylistTrack(Pending):
     playlist_name: str
     position: int
     db: Database
+    playlist_total: int | None = None
 
     async def resolve(self) -> Track | None:
-        if self.db.downloaded(self.id):
+        if self.db.downloaded(self.id, self.client.source):
             logger.info(f"Track ({self.id}) already logged in database. Skipping.")
             return None
         try:
@@ -52,7 +53,11 @@ class PendingPlaylistTrack(Pending):
             logger.error(f"Could not stream track {self.id}: {e}")
             return None
 
-        album = AlbumMetadata.from_track_resp(resp, self.client.source)
+        if self.client.source == "tidal":
+            album_resp = await self.client.get_metadata(str(resp["album"]["id"]), "album")
+            album = AlbumMetadata.from_album_resp(album_resp, "tidal")
+        else:
+            album = AlbumMetadata.from_track_resp(resp, self.client.source)
         if album is None:
             logger.error(
                 f"Track ({self.id}) not available for stream on {self.client.source}",
@@ -72,7 +77,7 @@ class PendingPlaylistTrack(Pending):
         requested_quality = source_config.quality
         lower_quality_fallback = getattr(source_config, 'lower_quality_if_not_available', False)
         
-        if meta.info.quality < requested_quality and not lower_quality_fallback:
+        if self.client.source != "tidal" and meta.info.quality < requested_quality and not lower_quality_fallback:
             logger.error(f"Track '{meta.title}' by {meta.artist} (Album: {meta.album.album}) [{self.id}]: Quality {meta.info.quality} available but {requested_quality} requested - skipping due to lower_quality_if_not_available=false")
             self.db.set_failed(self.client.source, "track", self.id)
             return None
@@ -80,10 +85,14 @@ class PendingPlaylistTrack(Pending):
         c = self.config.session.metadata
         if c.renumber_playlist_tracks:
             meta.tracknumber = self.position
+            meta.discnumber = 1
+            album.disctotal = 1
+            if self.playlist_total is not None:
+                album.tracktotal = self.playlist_total
         if c.set_playlist_to_album:
             album.album = self.playlist_name
 
-        quality = self.config.session.get_source(self.client.source).quality
+        quality = requested_quality if self.client.source == "tidal" else min(requested_quality, meta.info.quality)
         try:
             embedded_cover_path, downloadable = await asyncio.gather(
                 self._download_cover(album.covers, self.folder),
@@ -93,6 +102,12 @@ class PendingPlaylistTrack(Pending):
             logger.error(f"Error fetching download info for track {self.id}: {e}")
             self.db.set_failed(self.client.source, "track", self.id)
             return None
+
+        meta.info.container = downloadable.extension.upper()
+        if self.client.source == "tidal":
+            meta.info.quality = downloadable.quality
+            meta.info.bit_depth = downloadable.bit_depth
+            meta.info.sampling_rate = downloadable.sampling_rate
 
         return Track(
             meta,
@@ -172,13 +187,13 @@ class PendingPlaylist(Pending):
             logger.error(
                 f"Playlist {self.id} not available to stream on {self.client.source} ({e})",
             )
-            return None
+            raise
 
         try:
             meta = PlaylistMetadata.from_resp(resp, self.client.source)
         except Exception as e:
             logger.error(f"Error creating playlist: {e}")
-            return None
+            raise
         name = meta.name
         parent = self.config.session.downloads.folder
         folder = os.path.join(parent, clean_filepath(name))
@@ -191,6 +206,7 @@ class PendingPlaylist(Pending):
                 name,
                 position + 1,
                 self.db,
+                playlist_total=len(meta.ids()),
             )
             for position, id in enumerate(meta.ids())
         ]
@@ -226,7 +242,7 @@ class PendingPlaylist(Pending):
         # Stream tracks one by one
         for position, track_id in enumerate(meta.ids()):
             # Check if already downloaded
-            if self.db.downloaded(track_id):
+            if self.db.downloaded(track_id, self.client.source):
                 logger.debug(f"Track {track_id} already downloaded, skipping")
                 continue
 
@@ -239,6 +255,7 @@ class PendingPlaylist(Pending):
                     name,
                     position + 1,
                     self.db,
+                    playlist_total=len(meta.ids()),
                 )
                 track = await pending_track.resolve()
 
@@ -329,6 +346,7 @@ class PendingLastfmPlaylist(Pending):
                     playlist_title,
                     pos,
                     self.db,
+                    playlist_total=len(titles_artists),
                 ),
             )
 
@@ -375,7 +393,7 @@ class PendingLastfmPlaylist(Pending):
                     client = self.client
 
                 # Check if already downloaded
-                if self.db.downloaded(track_id):
+                if self.db.downloaded(track_id, client.source):
                     logger.debug(f"Track {track_id} already downloaded, skipping")
                     continue
 
@@ -388,6 +406,7 @@ class PendingLastfmPlaylist(Pending):
                     playlist_title,
                     pos,
                     self.db,
+                    playlist_total=len(titles_artists),
                 )
                 track = await pending_track.resolve()
 

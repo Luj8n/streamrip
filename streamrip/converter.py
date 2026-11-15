@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import shutil
-from tempfile import gettempdir
+from tempfile import TemporaryDirectory
 from typing import Final, Optional
 
 from .exceptions import ConversionError
@@ -55,7 +55,6 @@ class Converter:
 
         self.filename = filename
         self.final_fn = f"{os.path.splitext(filename)[0]}.{self.container}"
-        self.tempfile = os.path.join(gettempdir(), os.path.basename(self.final_fn))
         self.remove_source = remove_source
         self.sampling_rate = sampling_rate
         self.bit_depth = bit_depth
@@ -81,23 +80,25 @@ class Converter:
         if custom_fn:
             self.final_fn = custom_fn
 
-        self.command = self._gen_command()
-        logger.debug("Generated conversion command: %s", self.command)
-
-        process = await asyncio.create_subprocess_exec(
-            *self.command,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await process.communicate()
-        if process.returncode == 0 and os.path.isfile(self.tempfile):
-            if self.remove_source:
+        with TemporaryDirectory(prefix=".streamrip-convert-", dir=os.path.dirname(os.path.abspath(self.final_fn))) as staging:
+            self.tempfile = os.path.join(staging, os.path.basename(self.final_fn))
+            self.command = self._gen_command()
+            logger.debug("Generated conversion command: %s", self.command)
+            process = await asyncio.create_subprocess_exec(
+                *self.command,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, err = await process.communicate()
+            except asyncio.CancelledError:
+                process.kill()
+                await process.wait()
+                raise
+            if process.returncode != 0 or not os.path.isfile(self.tempfile):
+                raise ConversionError(f"FFmpeg output: {err.decode(errors='replace')}")
+            os.replace(self.tempfile, self.final_fn)
+            if self.remove_source and os.path.abspath(self.filename) != os.path.abspath(self.final_fn):
                 os.remove(self.filename)
-                logger.debug("Source removed: %s", self.filename)
-
-            shutil.move(self.tempfile, self.final_fn)
-            logger.debug("Moved: %s -> %s", self.tempfile, self.final_fn)
-        else:
-            raise ConversionError(f"FFmpeg output:\n{out, err}")
 
     def _gen_command(self):
         command = [

@@ -18,6 +18,7 @@ from ..exceptions import (
     MissingCredentialsError,
     NonStreamableError,
 )
+from ..metadata.util import safe_get
 from .client import Client
 from .downloadable import BasicDownloadable, Downloadable
 
@@ -198,14 +199,12 @@ class QobuzClient(Client):
                 "app_id": str(c.app_id),
             }
 
-        logger.debug("Request params %s", params)
         status, resp = await self._api_request("user/login", params)
-        logger.debug("Login resp: %s", resp)
 
         if status == 401:
-            raise AuthenticationError(f"Invalid credentials from params {params}")
+            raise AuthenticationError("Qobuz rejected the credentials")
         elif status == 400:
-            raise InvalidAppIdError(f"Invalid app id from params {params}")
+            raise InvalidAppIdError("Qobuz rejected the app ID")
 
         logger.debug("Logged in to Qobuz")
 
@@ -258,18 +257,14 @@ class QobuzClient(Client):
         elif media_type in ("artist", "label") and "albums" in resp and "items" in resp["albums"]:
             resp["albums"] = resp["albums"]["items"]
 
-        # Process copyright deduplication for albums
-        if media_type == "album" and "copyright" in resp:
-            resp["copyright"] = self.deduplicate_copyright(resp["copyright"])
-
         # Process performer roles for tracks
         if media_type == "track" and "performers" in resp:
-            resp["_parsed_performer_roles"] = self.parse_performers(resp["performers"])
+            resp["_parsed_performer_roles"] = self.parse_performers(resp["performers"], [safe_get(resp, "performer", "name"), safe_get(resp, "composer", "name")])
         elif media_type == "album" and "tracks" in resp:
             # Process performers for all tracks in album response
             for track in resp["tracks"]:
                 if "performers" in track:
-                    track["_parsed_performer_roles"] = self.parse_performers(track["performers"])
+                    track["_parsed_performer_roles"] = self.parse_performers(track["performers"], [safe_get(track, "performer", "name"), safe_get(track, "composer", "name")])
 
         return resp
 
@@ -469,9 +464,7 @@ class QobuzClient(Client):
         quality = self.get_quality(quality)
         unix_ts = time.time()
         r_sig = f"trackgetFileUrlformat_id{quality}intentstreamtrack_id{track_id}{unix_ts}{secret}"
-        logger.debug("Raw request signature: %s", r_sig)
         r_sig_hashed = hashlib.md5(r_sig.encode("utf-8")).hexdigest()
-        logger.debug("Hashed request signature: %s", r_sig_hashed)
         params = {
             "request_ts": unix_ts,
             "request_sig": r_sig_hashed,
@@ -486,10 +479,14 @@ class QobuzClient(Client):
         returns: status code, json parsed response
         """
         url = f"{QOBUZ_BASE_URL}/{epoint}"
-        logger.debug("api_request: endpoint=%s, params=%s", epoint, params)
-        async with self.rate_limiter:
-            async with self.session.get(url, params=params) as response:
-                return response.status, await response.json()
+        logger.debug("api_request: endpoint=%s", epoint)
+        try:
+            async with self.rate_limiter:
+                async with self.session.get(url, params=params) as response:
+                    return response.status, await response.json()
+        except aiohttp.ClientError as e:
+            # Request URLs can contain login credentials.
+            raise RuntimeError(f"Qobuz {epoint} failed ({type(e).__name__})") from None
 
     @staticmethod
     def get_quality(quality: int):
@@ -497,7 +494,7 @@ class QobuzClient(Client):
         return quality_map[quality - 1]
 
     @staticmethod
-    def parse_performers(performers_str: str | None) -> dict[str, list[str]]:
+    def parse_performers(performers_str: str | None, known_names=()) -> dict[str, list[str]]:
         """
         Parse Qobuz performers string to extract all roles and performers.
         
@@ -524,14 +521,17 @@ class QobuzClient(Client):
             if not entry.strip():
                 continue
                 
-            # Split by comma to get name and roles
-            parts = [part.strip() for part in entry.split(',')]
-            if len(parts) < 2:
-                continue
-                
-            name = parts[0]
-            roles = [role.strip() for role in parts[1:]]
-            
+            entry = entry.strip()
+            name = next((n for n in sorted(filter(None, known_names), key=len, reverse=True) if entry.startswith(n + ",")), None)
+            if name is not None:
+                roles = [part.strip() for part in entry[len(name) + 1:].split(",")]
+            else:
+                parts = [part.strip() for part in entry.split(",")]
+                if len(parts) < 2:
+                    continue
+                name, roles = parts[0], parts[1:]
+            # Keep the original credits in the tags: free-text names can be ambiguous.
+
             # Add performer to each of their roles
             for role in roles:
                 if role not in roles_dict:
@@ -540,29 +540,3 @@ class QobuzClient(Client):
                     roles_dict[role].append(name)
         
         return roles_dict
-
-    @staticmethod
-    def deduplicate_copyright(copyright_str: str) -> str:
-        """
-        Remove duplicate parts from copyright strings.
-        
-        Examples:
-            "2022 Nuclear Blast 2022 Nuclear Blast" -> "2022 Nuclear Blast"
-            "2023 Merge Records 2023 Merge Records" -> "2023 Merge Records"
-        """
-        if not copyright_str:
-            return copyright_str
-        
-        # Split by spaces and look for repeating patterns
-        words = copyright_str.split()
-        
-        # Try to find the midpoint where duplication starts
-        half_len = len(words) // 2
-        if half_len > 0:
-            first_half = words[:half_len]
-            second_half = words[half_len:half_len*2]  # Only check same length
-            
-            if first_half == second_half:
-                return " ".join(first_half)
-        
-        return copyright_str

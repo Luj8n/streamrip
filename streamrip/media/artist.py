@@ -227,7 +227,7 @@ class PendingArtist(Pending):
             logger.error(
                 f"Artist {self.id} not available to stream on {self.client.source} ({e})",
             )
-            return
+            raise
 
         try:
             meta = ArtistMetadata.from_resp(resp, self.client.source)
@@ -235,8 +235,9 @@ class PendingArtist(Pending):
             logger.error(
                 f"Error building artist metadata: {e}",
             )
-            return
+            raise
 
+        failures = 0
         album_ids = meta.album_ids()
         artist_name = meta.name
 
@@ -256,6 +257,12 @@ class PendingArtist(Pending):
                 *[album.resolve() for album in pending_albums],
                 return_exceptions=True
             )
+            for result, album_id in zip(resolved_albums, album_ids):
+                if isinstance(result, Exception) or (
+                    result is None and not self.db.release_downloaded(album_id, "album", self.client.source)
+                ):
+                    failures += 1
+                    logger.error("Could not resolve album %s", album_id)
             valid_albums = [a for a in resolved_albums if isinstance(a, Album)]
 
             # Apply filters including repeat removal
@@ -268,7 +275,7 @@ class PendingArtist(Pending):
             # Stream albums one by one, applying filters as we go
             for album_id in album_ids:
                 # Check if already downloaded
-                if self.db.downloaded(album_id):
+                if self.db.release_downloaded(album_id, "album", self.client.source):
                     logger.debug(f"Album {album_id} already downloaded, skipping")
                     continue
 
@@ -277,6 +284,8 @@ class PendingArtist(Pending):
                     album = await pending_album.resolve()
 
                     if album is None:
+                        if not self.db.release_downloaded(album_id, "album", self.client.source):
+                            raise NonStreamableError(f"Could not resolve album {album_id}")
                         continue
 
                     # Apply filters (except repeats which requires all albums)
@@ -285,7 +294,10 @@ class PendingArtist(Pending):
 
                 except Exception as e:
                     logger.error(f"Error resolving album {album_id}: {e}")
-                    continue
+                    failures += 1
+
+        if failures:
+            raise NonStreamableError(f"Could not resolve {failures} album(s) for {artist_name}")
 
     def _apply_filters_to_albums(self, albums: list[Album], filters, artist_name: str) -> list[Album]:
         """Apply all filters to a list of albums (used when repeat filtering is enabled)."""

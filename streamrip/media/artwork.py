@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shutil
+import tempfile
 
 import aiohttp
 from PIL import Image
@@ -13,6 +14,12 @@ from ..metadata import Covers
 _artwork_tempdirs: set[str] = set()
 
 logger = logging.getLogger("streamrip")
+
+
+def artwork_tempdir() -> str:
+    path = tempfile.mkdtemp(prefix="streamrip-artwork-")
+    _artwork_tempdirs.add(path)
+    return path
 
 
 def remove_artwork_tempdirs():

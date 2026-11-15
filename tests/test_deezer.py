@@ -141,3 +141,44 @@ def test_deezer_get_track_metadata(deezer_client):
     assert downloadable.quality == highest_quality
     assert downloadable.url.startswith("https://")
     assert arun(downloadable.size()) > 0
+
+
+async def test_deezer_preserves_all_gateway_credit_roles(mock_deezer_client):
+    client = mock_deezer_client
+    client.client.api.get_track.return_value = {'id': '1', 'album': {'id': '2'}}
+    client.client.api.get_album.return_value = {'id': '2'}
+    client.client.api.get_album_tracks.return_value = {'data': []}
+    client.client.gw.get_track.return_value = {
+        'SNG_CONTRIBUTORS': {'main_artist': ['Earth, Wind & Fire'], 'composer': ['Writer'], 'masteringengineer': ['Engineer']},
+        'FILESIZE_FLAC': '10',
+    }
+    response = await client.get_track('1')
+    assert response['composer'] == ['Writer']
+    assert response['credits'] == ['Earth, Wind & Fire (main_artist)', 'Writer (composer)', 'Engineer (masteringengineer)']
+
+
+async def test_unencrypted_deezer_reuses_initial_response(tmp_path):
+    import asyncio
+    import aiohttp
+    from streamrip.client.downloadable import DeezerDownloadable
+
+    calls = 0
+    body = b'a' * 25000
+
+    async def respond(reader, writer):
+        nonlocal calls
+        calls += 1
+        await reader.readuntil(b'\r\n\r\n')
+        writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 25000\r\nConnection: close\r\n\r\n' + body)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(respond, '127.0.0.1', 0)
+    async with server, aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1)) as session:
+        port = server.sockets[0].getsockname()[1]
+        item = DeezerDownloadable(session, {'url': f'http://127.0.0.1:{port}/audio', 'id': '1', 'quality': 2})
+        path = tmp_path / 'audio.flac'
+        await asyncio.wait_for(item.download(str(path), lambda _: None), timeout=2)
+        assert path.read_bytes() == body
+        assert calls == 1

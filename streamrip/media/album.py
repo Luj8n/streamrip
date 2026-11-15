@@ -12,7 +12,7 @@ from ..db import Database
 from ..exceptions import NonStreamableError
 from ..filepath_utils import clean_filepath
 from ..metadata import AlbumMetadata
-from .artwork import download_artwork
+from .artwork import artwork_tempdir, download_artwork
 from .media import Media, Pending
 from .track import PendingTrack
 
@@ -51,7 +51,7 @@ class Album(Media):
         console.print(f"  Tracks: {len(self.tracks)}")
         if self.meta.disctotal > 1:
             console.print(f"  Discs: {self.meta.disctotal}")
-        if hasattr(self.tracks[0], 'client') and hasattr(self.tracks[0].client, 'source'):
+        if self.tracks and hasattr(self.tracks[0], 'client') and hasattr(self.tracks[0].client, 'source'):
             console.print(f"  Source: {self.tracks[0].client.source}")
         console.print(f"  Folder: [dim]{self.folder}[/dim]")
         console.print("")
@@ -62,15 +62,21 @@ class Album(Media):
         if self.config.session.cli.dry_run:
             return
 
+        try:
+            os.rmdir(self.folder)
+        except OSError:
+            pass  # Keep directories that still contain files.
+
         # Check if all tracks in album were successfully downloaded
+        source = self.tracks[0].client.source if self.tracks else "unknown"
         track_ids = [track.id for track in self.tracks]
-        downloaded_tracks = sum(1 for track_id in track_ids if self.db.downloaded(track_id))
+        downloaded_tracks = sum(1 for track_id in track_ids if self.db.downloaded(track_id, source))
         total_tracks = len(track_ids)
 
         # Only mark complete if ALL tracks succeeded
         if downloaded_tracks == total_tracks and total_tracks > 0:
             # Get album ID from meta or first track's album info
-            album_id = getattr(self.meta, 'id', None)
+            album_id = self.meta.info.id
             if album_id:
                 # Get source from tracks' client
                 source = getattr(self.tracks[0].client, 'source', 'unknown') if self.tracks else 'unknown'
@@ -103,6 +109,7 @@ class PendingAlbum(Pending):
 
         try:
             meta = AlbumMetadata.from_album_resp(resp, self.client.source)
+            meta.info.id = str(self.id)
         except Exception as e:
             logger.error(f"Error building album metadata for {id=}: {e}")
             return None
@@ -115,7 +122,7 @@ class PendingAlbum(Pending):
         tracklist = [track["id"] for track in resp["tracks"]]
         
         # Check if all tracks are already downloaded (edge case for pre-optimization downloads)
-        all_tracks_downloaded = all(self.db.downloaded(track_id) for track_id in tracklist)
+        all_tracks_downloaded = all(self.db.downloaded(track_id, self.client.source) for track_id in tracklist)
         if all_tracks_downloaded and len(tracklist) > 0:
             logger.info(f"Album {self.id} has all tracks already downloaded - marking as complete")
             self.db.set_release_downloaded(self.id, "album", self.client.source, len(tracklist))
@@ -123,10 +130,9 @@ class PendingAlbum(Pending):
         
         folder = self.config.session.downloads.folder
         album_folder = self._album_folder(folder, meta)
-        os.makedirs(album_folder, exist_ok=True)
         embed_cover, _ = await download_artwork(
             self.client.session,
-            album_folder,
+            artwork_tempdir(),
             meta.covers,
             self.config.session.artwork,
             for_playlist=False,
@@ -143,7 +149,6 @@ class PendingAlbum(Pending):
             )
             for id in tracklist
         ]
-        logger.debug("Pending tracks: %s", pending_tracks)
         return Album(meta, pending_tracks, self.config, album_folder, self.db)
 
     def _album_folder(self, parent: str, meta: AlbumMetadata) -> str:

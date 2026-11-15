@@ -107,6 +107,12 @@ class TidalClient(Client):
             item["albums"] = album_resp["items"]
             item["albums"].extend(ep_resp["items"])
         elif media_type == "track":
+            try:
+                credits = await self._api_request(f"tracks/{item_id}/contributors")
+                item["contributors"] = credits.get("items", [])
+            except NonStreamableError as e:
+                logger.warning("Tidal credits unavailable for track %s: %s", item_id, e)
+                item["contributors"] = []
             if self.config.fetch_lyrics:
                 try:
                     resp = await self._api_request(
@@ -183,7 +189,7 @@ class TidalClient(Client):
         }
         assert media_type in ("album", "track", "playlist", "video", "artist")
         resp = await self._api_request(f"search/{media_type}s", params=params)
-        if len(resp["items"]) > 1:
+        if resp["items"]:
             return [resp]
         return []
 
@@ -222,17 +228,29 @@ class TidalClient(Client):
         # Handle both single URL and URL list formats
         urls = manifest_data.get("urls", [])
         if isinstance(urls, list) and len(urls) > 0:
-            url = urls[0] if not isinstance(urls[0], list) else urls
+            url = urls if manifest_mime == "application/dash+xml" else urls[0]
         else:
             url = None
 
-        return TidalDownloadable(
+        actual_quality = quality_map.index(resp["audioQuality"])
+        if actual_quality < quality:
+            message = f"Tidal returned {resp['audioQuality']} instead of {tidal_quality} for track {track_id}."
+            if not self.config.lower_quality_if_not_available:
+                raise NonStreamableError(message)
+            logger.warning(message)
+        if manifest_data.get("encryptionType", "NONE") != "NONE":
+            raise NonStreamableError("Tidal returned an unsupported encrypted stream")
+
+        downloadable = TidalDownloadable(
             self.session,
             url=url,
             codec=manifest_data["codecs"],
             restrictions=manifest_data.get("restrictions"),
-            quality=quality,
+            quality=actual_quality,
         )
+        downloadable.bit_depth = resp.get("bitDepth")
+        downloadable.sampling_rate = resp["sampleRate"] / 1000 if resp.get("sampleRate") else None
+        return downloadable
 
     async def get_video_file_url(self, video_id: str) -> str:
         """Get the HLS video stream url.
@@ -274,10 +292,12 @@ class TidalClient(Client):
             # Define XML namespace for DASH
             ns = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
 
-            # Find the first Representation element (highest quality is typically listed first or last)
-            representation = root.find(".//mpd:Representation", ns)
-            if representation is None:
-                raise Exception("No Representation found in DASH manifest")
+            if root.find(".//mpd:ContentProtection", ns) is not None:
+                raise NonStreamableError("Tidal returned an unsupported encrypted DASH stream")
+            representations = root.findall(".//mpd:Representation", ns)
+            if not representations:
+                raise NonStreamableError("No Representation found in DASH manifest")
+            representation = max(representations, key=lambda rep: int(rep.get("bandwidth", "0")))
 
             # Extract codec info
             codecs = representation.get("codecs", "flac")
@@ -290,6 +310,8 @@ class TidalClient(Client):
             # Get media URL template and initialization URL
             media_template = segment_template.get("media")
             initialization = segment_template.get("initialization")
+            if not media_template or not initialization:
+                raise NonStreamableError("Tidal DASH manifest is missing segment URLs.")
             start_number = int(segment_template.get("startNumber", "0"))
 
             # Get SegmentTimeline to determine number of segments
@@ -300,13 +322,14 @@ class TidalClient(Client):
             segments = timeline.findall("mpd:S", ns)
 
             # Calculate total number of segments from timeline
-            segment_urls = []
+            segment_urls = [initialization]
             segment_number = start_number
 
             for seg in segments:
                 repeat = int(seg.get("r", "0"))
-                # r=-1 means repeat until end, r=0 means 1 segment, r=N means N+1 segments
-                num_segments = repeat + 1 if repeat >= 0 else 1
+                if repeat < 0:
+                    raise NonStreamableError("Unsupported open-ended Tidal DASH timeline")
+                num_segments = repeat + 1
 
                 for _ in range(num_segments):
                     # Replace $Number$ placeholder with actual segment number
@@ -314,11 +337,12 @@ class TidalClient(Client):
                     segment_urls.append(url)
                     segment_number += 1
 
-            # Return in BTS manifest-compatible format
+            if any("$" in url for url in segment_urls):
+                raise NonStreamableError("Unsupported Tidal DASH URL template")
             return {
                 "urls": segment_urls,
                 "codecs": codecs,
-                "encryptionType": "NONE",  # DASH manifests from tiddl analysis show no encryption
+                "encryptionType": "NONE",
                 "mimeType": f"audio/{codecs}",
             }
 
@@ -383,7 +407,6 @@ class TidalClient(Client):
             "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
             "scope": "r_usr+w_usr+w_sub",
         }
-        logger.debug("Checking with %s", data)
         resp = await self._api_post(f"{AUTH_URL}/token", data, AUTH, allow_http_errors=True)
 
         # Handle Tidal's response format
@@ -429,6 +452,14 @@ class TidalClient(Client):
         c = self.config
         c.access_token = resp["access_token"]
         c.token_expiry = resp["expires_in"] + time.time()
+        c.refresh_token = resp.get("refresh_token", c.refresh_token)
+        self.refresh_token = c.refresh_token
+        saved = self.global_config.file.tidal
+        saved.access_token = c.access_token
+        saved.refresh_token = c.refresh_token
+        saved.token_expiry = c.token_expiry
+        self.global_config.file.set_modified()
+        self.global_config.save_file()
         self._update_authorization_from_config()
 
     async def _get_device_code(self) -> tuple[str, str]:
@@ -463,7 +494,7 @@ class TidalClient(Client):
             params = {}
 
         params["countryCode"] = self.config.country_code
-        params["limit"] = 100
+        params.setdefault("limit", 100)
 
         return await self._request_with_retry(
             lambda: self.session.get(f"{base}/{path}", params=params), 

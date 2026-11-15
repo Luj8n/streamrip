@@ -28,11 +28,11 @@ class TrackMetadata:
     info: TrackInfo
     title: str
     album: AlbumMetadata
-    artist: str  # Primary/first artist only (MusicBrainz standard)
+    artist: str  # Display credit; individual names are preserved in artists.
     tracknumber: int
     discnumber: int
-    composer: str | None
-    author: str | None  # Songwriter/lyricist
+    composer: str | list[str] | None
+    author: str | list[str] | None  # Songwriter/lyricist
     # Fields with defaults must come after non-default fields
     artists: list[str] | None = None  # All contributing artists (MusicBrainz standard)
     isrc: str | None = None
@@ -42,6 +42,7 @@ class TrackMetadata:
     # New standard tags
     track_artist_credit: str | None = None  # Different from track artist
     media_type: str | None = None  # "WEB" for streaming sources
+    credits: str | list[str] | None = None
 
     @classmethod
     def from_qobuz(cls, album: AlbumMetadata, resp: dict) -> TrackMetadata:
@@ -53,11 +54,9 @@ class TrackMetadata:
         work = typed(resp.get("work"), str | None)
         if version is not None and version not in title:
             title = f"{title} ({version})"
-        if work is not None and work not in title:
-            title = f"{work}: {title}"
 
         # Get base composer from API response
-        base_composer = typed(resp.get("composer", {}).get("name"), str | None)
+        base_composer = typed(safe_get(resp, "composer", "name"), str | None)
         
         tracknumber = typed(resp.get("track_number", 1), int)
         discnumber = typed(resp.get("media_number", 1), int)
@@ -69,7 +68,7 @@ class TrackMetadata:
             ),
             str,
         )
-        artists = [artist]  # Qobuz typically has single artist
+        artists = [artist]
         track_id = str(resp["id"])
         bit_depth = typed(resp.get("maximum_bit_depth"), int | None)
         sampling_rate = typed(resp.get("maximum_sampling_rate"), int | float | None)
@@ -78,28 +77,21 @@ class TrackMetadata:
         parsed_roles = resp.get("_parsed_performer_roles", {})
         
         # Extract composers and authors from parsed roles
-        composers_from_roles = parsed_roles.get("Composer", [])
-        authors_from_roles = parsed_roles.get("Author", []) + parsed_roles.get("Lyricist", [])
+        composers_from_roles = parsed_roles.get("Composer", []) + parsed_roles.get("ComposerLyricist", [])
+        authors_from_roles = parsed_roles.get("Author", []) + parsed_roles.get("Lyricist", []) + parsed_roles.get("ComposerLyricist", [])
         
-        # Combine base composer with performers composers, avoiding duplicates
-        all_composers = []
-        if base_composer:
-            base_composers = [c.strip() for c in base_composer.split(",")]
-            all_composers.extend(base_composers)
-        
-        # Add parsed composers, avoiding duplicates
-        for composer_name in composers_from_roles:
-            if composer_name not in all_composers:
-                all_composers.append(composer_name)
-        
-        composer = ", ".join(all_composers) if all_composers else None
-        author = ", ".join(authors_from_roles) if authors_from_roles else None
-        
+        composer = list(dict.fromkeys(([base_composer] if base_composer else []) + composers_from_roles)) or None
+        author = list(dict.fromkeys(authors_from_roles + parsed_roles.get("Writer", []))) or None
+        credited_artists = parsed_roles.get("MainArtist", []) + parsed_roles.get("FeaturedArtist", [])
+        if credited_artists:
+            artists = list(dict.fromkeys(credited_artists))
+            artist = ", ".join(artists)
+
         # Additional Qobuz metadata
         media_type = "Digital Media"  # MusicBrainz standard for digital/streaming sources
         
         # Is the info included?
-        explicit = False
+        explicit = resp.get("parental_warning", False)
 
         info = TrackInfo(
             id=track_id,
@@ -122,13 +114,13 @@ class TrackMetadata:
             artists=artists,
             isrc=isrc,
             media_type=media_type,
+            credits=resp.get("performers"),
         )
 
     @classmethod
     def from_deezer(cls, album: AlbumMetadata, resp) -> TrackMetadata:
         track_id = str(resp["id"])
         # Get first artist ID from contributors list
-        artist_id = str(resp["contributors"][0]["id"]) if resp["contributors"] else None
         isrc = typed(resp["isrc"], str)
         
         # Process Deezer qualities into standardized format
@@ -169,7 +161,7 @@ class TrackMetadata:
         contributors = resp.get("contributors", [])
         if contributors:
             all_artists = [contributor["name"] for contributor in contributors]
-            artist = all_artists[0]  # Primary artist (first one)
+            artist = ", ".join(all_artists)
             artists = all_artists  # All artists
         else:
             # Fallback to single artist if no contributors
@@ -188,13 +180,13 @@ class TrackMetadata:
         if "composer" in resp:
             composers = resp["composer"]
             if isinstance(composers, list) and composers:
-                composer = ", ".join(composers)
+                composer = composers
             elif isinstance(composers, str):
                 composer = composers
         if "author" in resp:
             authors = resp["author"] 
             if isinstance(authors, list) and authors:
-                author = ", ".join(authors)
+                author = authors
             elif isinstance(authors, str):
                 author = authors
         info = TrackInfo(
@@ -220,6 +212,7 @@ class TrackMetadata:
             bpm=bpm,
             track_artist_credit=track_artist_credit,
             media_type=media_type,
+            credits=resp.get("credits"),
         )
 
     @classmethod
@@ -267,26 +260,29 @@ class TrackMetadata:
         isrc = typed(track["isrc"], str)
         version = track.get("version")
         explicit = track.get("explicit", False)
-        if version:
+        if version and version not in title:
             title = f"{title} ({version})"
 
         tracknumber = typed(track.get("trackNumber", 1), int)
         discnumber = typed(track.get("volumeNumber", 1), int)
 
-        tidal_artists = track.get("artists")
+        tidal_artists = track.get("artists") or []
         if len(tidal_artists) > 0:
             all_artist_names = [a["name"] for a in tidal_artists]
-            artist = all_artist_names[0]  # Primary artist (first one)
+            artist = ", ".join(all_artist_names)
             artists = all_artist_names  # All artists
-            artist_id = str(tidal_artists[0]["id"])
         else:
             artist = track["artist"]["name"]
             artists = [artist]  # Single artist list
-            artist_id = str(track["artist"]["id"])
 
         # Check if track is streamable from Tidal API
         allow_streaming = track.get("allowStreaming", True)
         streamable = allow_streaming
+
+        contributors = track.get("contributors") or []
+        composers = list(dict.fromkeys(c["name"] for c in contributors if c.get("role") == "Composer"))
+        authors = list(dict.fromkeys(c["name"] for c in contributors if c.get("role") in {"Lyricist", "Writer", "Author"}))
+        credits = [f"{c['name']} ({c['role']})" for c in contributors if c.get("name") and c.get("role")]
 
         lyrics = track.get("lyrics", "")
         
@@ -304,7 +300,7 @@ class TrackMetadata:
         
         # Set bit depth and sampling rate based on quality
         if quality >= 2:
-            sampling_rate = 44100
+            sampling_rate = album.info.sampling_rate
             if quality == 3:
                 bit_depth = 24
             else:
@@ -328,13 +324,14 @@ class TrackMetadata:
             artist=artist,
             tracknumber=tracknumber,
             discnumber=discnumber,
-            composer=None,
-            author=None,
+            composer=composers or None,
+            author=authors or None,
             artists=artists,
             isrc=isrc,
             lyrics=lyrics,
             bpm=bpm,
             media_type=media_type,
+            credits=credits or None,
         )
 
     @classmethod
@@ -353,20 +350,19 @@ class TrackMetadata:
         # Available keys: "tracknumber", "artist", "artists", "albumartist", "composer", "title",
         # "explicit", "albumcomposer", "album", "container"
         none_text = "Unknown"
-        # artist = primary artist only (MusicBrainz standard)
-        # artists = all artists comma-separated (MusicBrainz standard)
         artists_str = ", ".join(self.artists) if self.artists else self.artist
         
         info = {
             "id": self.info.id,
             "title": self.title,
             "tracknumber": self.tracknumber,
-            "artist": self.artist,  # Primary artist only
+            "discnumber": self.discnumber,
+            "artist": self.artist,
             "artists": artists_str,  # All artists comma-separated
             "albumartist": self.album.albumartist,
             "albumcomposer": self.album.albumcomposer or none_text,
-            "composer": self.composer or none_text,
-            "explicit": " (Explicit) " if self.info.explicit else "",
+            "composer": (", ".join(self.composer) if isinstance(self.composer, list) else self.composer) or none_text,
+            "explicit": " (Explicit)" if self.info.explicit else "",
             "album": self.album.album,
             "container": self.info.container or none_text,
         }

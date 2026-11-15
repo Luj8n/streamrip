@@ -15,7 +15,6 @@ COPYRIGHT = "\u00a9"
 logger = logging.getLogger("streamrip")
 
 
-genre_clean = re.compile(r"([^\u2192\/]+)")
 
 
 @dataclass(slots=True)
@@ -60,17 +59,13 @@ class AlbumMetadata:
     album_artist_credit: str | None = None  # Different from album artist
     originaldate: str | None = None  # Vorbis standard name
     media_type: str | None = None  # "WEB" for streaming sources
+    albumartists: list[str] | None = None
 
     def get_genres(self) -> str:
         return ", ".join(self.genre)
 
     def get_copyright(self) -> str | None:
-        if self.copyright is None:
-            return None
-        # Add special chars
-        _copyright = re.sub(r"(?i)\(P\)", PHON_COPYRIGHT, self.copyright)
-        _copyright = re.sub(r"(?i)\(C\)", COPYRIGHT, _copyright)
-        return _copyright
+        return self.copyright
 
     def format_folder_path(self, formatter: str) -> str:
         # Available keys: "albumartist", "title", "year", "bit_depth", "sampling_rate",
@@ -86,12 +81,16 @@ class AlbumMetadata:
             else:
                 releasetype_formatted = rt.title()
         
+        sampling_rate = self.info.sampling_rate
+        if isinstance(sampling_rate, float) and sampling_rate.is_integer():
+            sampling_rate = int(sampling_rate)
         info: dict[str, str | int | float] = {
             "albumartist": clean_filename(self.albumartist),
+            "albumartists": clean_filename(", ".join(self.albumartists or [self.albumartist])),
             "albumcomposer": clean_filename(self.albumcomposer or "") or none_str,
             "bit_depth": self.info.bit_depth or none_str,
             "id": self.info.id,
-            "sampling_rate": self.info.sampling_rate or none_str,
+            "sampling_rate": sampling_rate or none_str,
             "title": clean_filename(self.album),
             "year": self.year,
             "container": self.info.container,
@@ -103,20 +102,22 @@ class AlbumMetadata:
     @classmethod
     def from_qobuz(cls, resp: dict) -> AlbumMetadata:
         album = resp.get("title", "Unknown Album")
+        version = resp.get("version")
+        if version and version not in album:
+            album = f"{album} ({version})"
         tracktotal = resp.get("tracks_count", 1)
         genre_name = safe_get(resp, "genre", "name")
         genre = [genre_name] if genre_name else resp.get("genres_list") or []
-        genres = list(set(genre_clean.findall("/".join(genre))))
+        genres = list(genre)
         date = resp.get("release_date_original") or resp.get("release_date")
         year = date[:4] if date is not None else "Unknown"
 
         _copyright = resp.get("copyright", "")
 
-        if artists := resp.get("artists"):
-            # Get first artist as primary albumartist (MusicBrainz standard)
-            albumartist = artists[0]["name"]
-        else:
-            albumartist = typed(safe_get(resp, "artist", "name"), str)
+        albumartists = [a["name"] for a in resp.get("artists", []) if not a.get("roles") or any(role in a["roles"] for role in ("main-artist", "featured-artist"))]
+        if not albumartists:
+            albumartists = [typed(safe_get(resp, "artist", "name"), str)]
+        albumartist = ", ".join(albumartists)
 
         albumcomposer = typed(safe_get(resp, "composer", "name", default=""), str)
         _label = resp.get("label")
@@ -124,14 +125,10 @@ class AlbumMetadata:
             _label = _label["name"]
         label = typed(_label or "", str)
         description = typed(resp.get("description", ""), str)
-        disctotal = typed(
-            max(
-                track.get("media_number", 1)
-                for track in safe_get(resp, "tracks", default=[{}])  # type: ignore
-            )
-            or 1,
-            int,
-        )
+        tracks = resp.get("tracks") or []
+        if isinstance(tracks, dict):
+            tracks = tracks.get("items", [])
+        disctotal = resp.get("media_count") or max((track.get("media_number", 1) for track in tracks), default=1)
         explicit = typed(resp.get("parental_warning", False), bool)
 
         # Non-embedded information
@@ -142,12 +139,12 @@ class AlbumMetadata:
         quality = get_quality_id(bit_depth, sampling_rate)
         # Make sure it is non-empty list
         booklets = typed(resp.get("goodies", None) or None, list | None)
-        item_id = str(resp.get("qobuz_id"))
+        item_id = str(resp.get("id") or resp.get("qobuz_id"))
         
         # Extract additional Qobuz metadata
         upc = resp.get("upc")
         # Normalize release type casing: keep EP uppercase, others title case
-        raw_type = resp.get("release_type")
+        raw_type = resp.get("release_type") or ""
         type_mapper = {
             "epmini": "EP",
             "bestof": "Best Of",
@@ -195,21 +192,24 @@ class AlbumMetadata:
             releasetype=releasetype,
             originaldate=originaldate,
             media_type=media_type,
+            albumartists=albumartists,
         )
 
     @classmethod
     def from_deezer(cls, resp: dict) -> AlbumMetadata:
         album = resp.get("title", "Unknown Album")
         tracktotal = typed(resp.get("track_total", 0) or resp.get("nb_tracks", 0), int)
-        disctotal = typed(resp["tracks"][-1]["disk_number"], int)
+        disctotal = max((t.get("disk_number", 1) for t in resp.get("tracks", [])), default=1)
         genres = [typed(g["name"], str) for g in resp["genres"]["data"]]
 
         date = typed(resp["release_date"], str)
         year = date[:4]
-        _copyright = None
+        _copyright = resp.get("copyright")
         description = None
-        albumartist = typed(safe_get(resp, "artist", "name"), str)
-        artist_id = str(safe_get(resp, "artist", "id")) if safe_get(resp, "artist", "id") else None
+        albumartists = [a["name"] for a in resp.get("contributors", []) if a.get("role", "Main") in {"Main", "Featured"}]
+        if not albumartists:
+            albumartists = [typed(safe_get(resp, "artist", "name"), str)]
+        albumartist = ", ".join(albumartists)
         albumcomposer = None
         label = resp.get("label")
         booklets = None
@@ -231,7 +231,7 @@ class AlbumMetadata:
         # not embedded
         quality = 2
         bit_depth = 16
-        sampling_rate = 44100
+        sampling_rate = 44.1
         container = "FLAC"
 
         cover_urls = Covers.from_deezer(resp)
@@ -273,6 +273,7 @@ class AlbumMetadata:
             album_artist_credit=album_artist_credit,
             originaldate=originaldate,
             media_type=media_type,
+            albumartists=albumartists,
         )
 
     @classmethod
@@ -355,33 +356,17 @@ class AlbumMetadata:
         year = date[:4]
         _copyright = typed(resp.get("copyright", ""), str)
 
-        artists = typed(resp.get("artists", []), list)
-        artist_id = None
-        if artists:
-            # Get first artist as primary albumartist (MusicBrainz standard)
-            albumartist = artists[0]["name"]
-            artist_id = str(artists[0]["id"])
-        else:
-            albumartist = typed(safe_get(resp, "artist", "name", default=""), str)
-            if "artist" in resp and "id" in resp["artist"]:
-                artist_id = str(resp["artist"]["id"])
+        albumartists = [a["name"] for a in resp.get("artists", []) if a.get("type", "MAIN") in {"MAIN", "FEATURED"}]
+        if not albumartists:
+            albumartists = [typed(safe_get(resp, "artist", "name", default=""), str)]
+        albumartist = ", ".join(albumartists)
 
         disctotal = typed(resp.get("numberOfVolumes", 1), int)
         
-        # Extract label from copyright field since Tidal doesn't provide direct label field
-        label = None
-        if _copyright:
-            # Parse copyright to extract label: "(C) 2000 Label Name" -> "Label Name"
-            import re
-            copyright_match = re.match(r'^\([CP]\)\s*\d{4}\s*(.+)$', _copyright, re.IGNORECASE)
-            if copyright_match:
-                label = copyright_match.group(1).strip()
-            else:
-                # Fallback: if no year pattern, just remove (C) or (P) prefix
-                label_match = re.match(r'^\([CP]\)\s*(.+)$', _copyright, re.IGNORECASE)
-                if label_match:
-                    label = label_match.group(1).strip()
-        
+        label = resp.get("label")
+        if isinstance(label, dict):
+            label = label.get("name")
+
         # Extract additional Tidal metadata
         upc = resp.get("upc")  # UPC/Barcode
         # Normalize release type casing: keep EP uppercase, others title case
@@ -406,13 +391,17 @@ class AlbumMetadata:
             "HIGH": 1,
             "LOSSLESS": 2,
             "HI_RES": 3,
+            "HI_RES_LOSSLESS": 3,
         }
 
         tidal_quality = resp.get("audioQuality", "LOW")
+        if "HIRES_LOSSLESS" in (safe_get(resp, "mediaMetadata", "tags", default=[]) or []):
+            tidal_quality = "HI_RES_LOSSLESS"
         quality = quality_map[tidal_quality]
         if quality >= 2:
-            sampling_rate = 44100
+            sampling_rate = 44.1
             if quality == 3:
+                sampling_rate = None
                 bit_depth = 24
                 container = "FLAC"
             else:
@@ -456,6 +445,7 @@ class AlbumMetadata:
             upc=upc,
             releasetype=releasetype,
             media_type=media_type,
+            albumartists=albumartists,
         )
 
     @classmethod
@@ -526,13 +516,17 @@ class AlbumMetadata:
             "HIGH": 1,
             "LOSSLESS": 2,
             "HI_RES": 3,
+            "HI_RES_LOSSLESS": 3,
         }
 
         tidal_quality = resp.get("audioQuality", "LOW")
+        if "HIRES_LOSSLESS" in (safe_get(resp, "mediaMetadata", "tags", default=[]) or []):
+            tidal_quality = "HI_RES_LOSSLESS"
         quality = quality_map[tidal_quality]
         if quality >= 2:
-            sampling_rate = 44100
+            sampling_rate = 44.1
             if quality == 3:
+                sampling_rate = None
                 bit_depth = 24
                 container = "FLAC"
             else:
@@ -625,6 +619,8 @@ class AlbumMetadata:
         if source == "qobuz":
             return cls.from_qobuz(resp["album"])
         if source == "tidal":
+            if "releaseDate" in resp["album"]:
+                return cls.from_tidal(resp["album"])
             return cls.from_tidal_playlist_track_resp(resp)
         if source == "soundcloud":
             return cls.from_soundcloud(resp)

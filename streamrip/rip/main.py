@@ -4,14 +4,16 @@ import logging
 import platform
 
 import aiofiles
+from click import ClickException
 
 from .. import db
-from ..download_task import DownloadTask
 from ..client import Client, DeezerClient, QobuzClient, SoundcloudClient, TidalClient
-from ..config import APP_DIR, Config
+from ..config import Config
 from ..console import console
-from ..exceptions import SkipTrackError
+from ..download_task import DownloadTask
+from ..exceptions import NonStreamableError, SkipTrackError
 from ..media import (
+    Album,
     Media,
     Pending,
     PendingAlbum,
@@ -19,7 +21,11 @@ from ..media import (
     PendingLabel,
     PendingLastfmPlaylist,
     PendingPlaylist,
+    PendingPlaylistTrack,
     PendingSingle,
+    PendingTrack,
+    Playlist,
+    Track,
     remove_artwork_tempdirs,
 )
 from ..metadata import SearchResults
@@ -58,10 +64,11 @@ class Main:
         }
 
         # Global download queue and worker management
-        self.download_queue: asyncio.Queue[DownloadTask] = asyncio.Queue()
+        self.download_queue: asyncio.Queue[DownloadTask | None] = asyncio.Queue()
         self.worker_tasks: list[asyncio.Task] = []
-        self.max_workers = config.session.downloads.max_connections
-        self.shutdown_event = asyncio.Event()
+        self.max_workers = max(1, config.session.downloads.max_connections)
+        self.failures = 0
+        self.collections = []
 
         self.database: db.Database
 
@@ -92,102 +99,94 @@ class Main:
             self.worker_tasks.append(worker)
 
     async def stop_workers(self):
-        """Stop all download worker tasks."""
-        logger.debug("Stopping download workers")
-        self.shutdown_event.set()
-
-        # Add sentinel values to wake up workers
         for _ in self.worker_tasks:
             await self.download_queue.put(None)
-
-        # Wait for workers to finish
-        if self.worker_tasks:
-            await asyncio.gather(*self.worker_tasks, return_exceptions=True)
-            self.worker_tasks.clear()
-
-        self.shutdown_event.clear()
+        await asyncio.gather(*self.worker_tasks)
+        self.worker_tasks.clear()
 
     async def _download_worker(self, name: str):
-        """Download worker coroutine that processes tasks from the queue."""
-        logger.debug(f"Download worker {name} started")
-        max_retries = 3
-
-        while not self.shutdown_event.is_set():
+        while True:
+            task = await self.download_queue.get()
             try:
-                # Get task from queue (with timeout to allow shutdown)
-                task = await asyncio.wait_for(self.download_queue.get(), timeout=1.0)
-
-                # Sentinel value to stop worker
                 if task is None:
-                    break
-
-                logger.debug(f"Worker {name} processing task: {task.track.meta.title if hasattr(task.track, 'meta') else 'unknown'}")
-
+                    return
                 try:
-                    # Process the download task
                     await self._process_download_task(task)
-                    logger.debug(f"Worker {name} completed task successfully")
-
-                except SkipTrackError as e:
-                    # Track was intentionally skipped (e.g., quality requirements not met)
-                    # Don't retry these
-                    logger.debug(f"Worker {name} skipping task: {e}")
-
                 except Exception as e:
-                    logger.error(f"Worker {name} task failed: {e}")
-
-                    # Retry logic
-                    if task.retry_count < max_retries:
+                    if task.retry_count < 3 and not isinstance(e, (SkipTrackError, NonStreamableError)):
                         task.retry_count += 1
-                        logger.info(f"Retrying task (attempt {task.retry_count}/{max_retries})")
-                        await asyncio.sleep(task.retry_count * 2)  # Exponential backoff
+                        logger.warning("Download failed (%s); retry %s/3", e, task.retry_count)
+                        await asyncio.sleep(task.retry_count * 2)
                         await self.download_queue.put(task)
                     else:
-                        logger.error(f"Task failed after {max_retries} retries: {task.track}")
-                        # Add to failed downloads database
-                        if hasattr(task.track, 'meta') and hasattr(task.track.meta, 'info'):
-                            self.database.set_failed(task.track.meta.info.id)
-
-                finally:
-                    self.download_queue.task_done()
-
-            except asyncio.TimeoutError:
-                # Timeout is normal during shutdown
-                continue
-            except Exception as e:
-                logger.error(f"Worker {name} error: {e}")
-
-        logger.debug(f"Download worker {name} stopped")
+                        self.failures += 1
+                        track = task.track
+                        if isinstance(track, Track):
+                            source, item_id = track.downloadable.source, track.meta.info.id
+                        elif isinstance(track, (PendingSingle, PendingTrack, PendingPlaylistTrack)):
+                            source, item_id = track.client.source, track.id
+                        else:
+                            logger.error("Failed download: %s", e)
+                            continue
+                        try:
+                            self.database.set_failed(source, "track", item_id)
+                        except Exception as db_error:
+                            logger.error("Could not record failed download: %s", db_error)
+                        logger.error("Failed %s track %s: %s", source, item_id, e)
+            finally:
+                self.download_queue.task_done()
 
     async def _process_download_task(self, task: DownloadTask):
-        """Process a single download task (download + validate + tag).
-        """
-        # Resolve the track to get actual Track object
-        track_media = await task.track.resolve()
-        if not track_media:
-            raise Exception("Failed to resolve track")
-
-        # Download and process the track
-        await track_media.rip()
+        track = task.track
+        if isinstance(track, Pending):
+            if self.database.downloaded(track.id, track.client.source):
+                return
+            track = await track.resolve()
+            if track is None:
+                raise SkipTrackError("Track is unavailable or its metadata could not be resolved")
+        await track.rip()
 
     async def _queue_album_tracks(self, album):
-        """Extract tracks from album and queue them for download."""
-        logger.debug(f"Queuing {len(album.tracks)} tracks from album: {album.meta.album}")
-
-        # Run album preprocessing (progress tracking, dry run info, etc.)
+        # Albums and playlists share the same track queue and finalization.
         await album.preprocess()
-
+        self.collections.append(album)
         for track in album.tracks:
-            task = DownloadTask(
-                track=track,
-                album_ref=album,
-                retry_count=0,
-                task_type="download"
-            )
-            await self.download_queue.put(task)
+            await self.download_queue.put(DownloadTask(track, album_ref=album))
 
-        # Note: album.postprocess() will be called after all tracks are downloaded
-        # This happens in the worker when the last track of an album completes
+    async def _queue_pending(self, pending):
+        if isinstance(pending, (PendingSingle, PendingTrack, PendingPlaylistTrack)):
+            await self.download_queue.put(DownloadTask(pending))
+        elif isinstance(pending, PendingArtist):
+            async for album in pending.stream_albums():
+                await self._queue_album_tracks(album)
+        else:
+            media = await pending.resolve()
+            if media is None:
+                if isinstance(pending, PendingAlbum) and not self.database.release_downloaded(
+                    pending.id, "album", pending.client.source
+                ):
+                    raise RuntimeError(f"Could not resolve album {pending.id}")
+                return
+            if isinstance(media, (Album, Playlist)):
+                await self._queue_album_tracks(media)
+            elif hasattr(media, "albums"):
+                for album in media.albums:
+                    try:
+                        await self._queue_pending(album)
+                    except Exception as e:
+                        self.failures += 1
+                        logger.error("Could not process album %s: %s", album.id, e)
+            else:
+                await self.download_queue.put(DownloadTask(media))
+
+    async def _finish_downloads(self):
+        await self.download_queue.join()
+        for collection in self.collections:
+            await collection.postprocess()
+        self.collections.clear()
+        if self.failures:
+            raise ClickException(f"{self.failures} item(s) failed to download; see the errors above.")
+        logger.info("All downloads completed")
 
     async def add(self, url: str):
         """Add url as a pending item.
@@ -278,162 +277,40 @@ class Main:
 
 
     async def stream_process_urls(self, urls: list[str]):
-        """True streaming pipeline: process URLs and download items as they're discovered.
-
-        This eliminates all blocking by streaming items immediately rather than
-        batching them. Each album/track starts downloading as soon as it's discovered.
-        """
-        # Start workers for queue-based processing
+        self.failures = 0
         await self.start_workers()
-
         try:
-            # Track all download tasks to ensure they complete
-            download_tasks = set()
-
-            async def process_single_item(media_item):
-                """Process a single album or track"""
-                try:
-                    # Handle downloads based on media type
-                    if hasattr(media_item, 'tracks'):
-                        # For Albums: extract tracks and queue them individually
-                        await self._queue_album_tracks(media_item)
-                    else:
-                        # For individual Tracks: download directly
-                        await media_item.rip()
-
-                    return media_item
-                except Exception as e:
-                    logger.error(f"Error processing item {media_item}: {e}")
-                    return None
-
-            async def stream_from_url(url: str):
-                """Stream items from a single URL as they're discovered"""
+            for url in urls:
                 try:
                     parsed = parse_url(url)
                     if parsed is None:
-                        logger.error(f"Unable to parse url {url}")
-                        return
-
+                        raise ValueError(f"Unable to parse URL {url}")
                     client = await self.get_logged_in_client(parsed.source)
                     pending = await parsed.into_pending(client, self.config, self.database)
-
-                    # Handle different URL types with streaming
-                    if hasattr(pending, 'stream_albums'):
-                        # Artist/Label URLs - stream albums as discovered
-                        async for album in pending.stream_albums():
-                            # Start processing this album immediately
-                            task = asyncio.create_task(process_single_item(album))
-                            download_tasks.add(task)
-                            # Remove completed tasks to prevent memory buildup
-                            task.add_done_callback(download_tasks.discard)
-
-                    elif hasattr(pending, 'stream_tracks'):
-                        # Playlist URLs - stream tracks as discovered
-                        async for track in pending.stream_tracks():
-                            # Process track immediately
-                            task = asyncio.create_task(process_single_item(track))
-                            download_tasks.add(task)
-                            # Remove completed tasks to prevent memory buildup
-                            task.add_done_callback(download_tasks.discard)
-
-                    else:
-                        # Single album/track - resolve and process
-                        media = await pending.resolve()
-                        if media:
-                            # Create task for single item processing to ensure it uses the queue system
-                            task = asyncio.create_task(process_single_item(media))
-                            download_tasks.add(task)
-                            task.add_done_callback(download_tasks.discard)
-
+                    await self._queue_pending(pending)
                 except Exception as e:
-                    logger.error(
-                        f"Error streaming from URL {url}: {e}",
-                        exc_info=logger.level == logging.DEBUG
-                    )
-
-            # Process all URLs concurrently in streaming fashion
-            # Create tasks for each URL to process concurrently
-            url_tasks = [asyncio.create_task(stream_from_url(url)) for url in urls]
-
-            # Wait for all URL discovery to complete
-            await asyncio.gather(*url_tasks, return_exceptions=True)
-
-            # Now wait for all download tasks to complete
-            if download_tasks:
-                logger.info(f"Waiting for {len(download_tasks)} downloads to complete...")
-                await asyncio.gather(*download_tasks, return_exceptions=True)
-
-            # Wait for download queue to be fully processed
-            await self.download_queue.join()
-            logger.info("All streaming downloads completed")
-
+                    self.failures += 1
+                    logger.error("Could not process %s: %s", url, e)
+            await self._finish_downloads()
         finally:
-            # Stop workers when done
             await self.stop_workers()
 
     async def stream_process_single_url(self, url: str):
-        """Stream process a single URL - convenience method"""
         await self.stream_process_urls([url])
 
     async def stream_process_pending(self):
-        """Stream process all currently pending items.
-
-        This is used for search and ID commands that add items to pending
-        without URLs.
-        """
-        if not self.pending:
-            return
-
-        # Start workers for queue-based processing
+        self.failures = 0
         await self.start_workers()
-
         try:
-            download_tasks = set()
-
-            async def process_single_item(media_item):
-                """Process a single album or track"""
-                try:
-                    # Handle downloads based on media type
-                    if hasattr(media_item, 'tracks'):
-                        # For Albums: extract tracks and queue them individually
-                        await self._queue_album_tracks(media_item)
-                    else:
-                        # For individual Tracks: download directly
-                        await media_item.rip()
-
-                    return media_item
-                except Exception as e:
-                    logger.error(f"Error processing item {media_item}: {e}")
-                    return None
-
-            # Process each pending item
             for pending in self.pending:
                 try:
-                    # Resolve the pending item
-                    media = await pending.resolve()
-                    if media:
-                        # Start processing this item immediately
-                        task = asyncio.create_task(process_single_item(media))
-                        download_tasks.add(task)
-                        # Remove completed tasks to prevent memory buildup
-                        task.add_done_callback(download_tasks.discard)
+                    await self._queue_pending(pending)
                 except Exception as e:
-                    logger.error(f"Error resolving pending item {pending}: {e}")
-
-            # Wait for all download tasks to complete
-            if download_tasks:
-                logger.info(f"Waiting for {len(download_tasks)} downloads to complete...")
-                await asyncio.gather(*download_tasks, return_exceptions=True)
-
-            # Wait for download queue to be fully processed
-            await self.download_queue.join()
-
-            # Clear pending items
-            self.pending.clear()
-            logger.info("All streaming downloads completed")
-
+                    self.failures += 1
+                    logger.error("Could not resolve item: %s", e)
+            await self._finish_downloads()
         finally:
-            # Stop workers when done
+            self.pending.clear()
             await self.stop_workers()
 
     async def stream_process_lastfm(self, playlist_url: str):

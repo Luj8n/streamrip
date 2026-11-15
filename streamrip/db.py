@@ -44,7 +44,7 @@ class Dummy(DatabaseInterface):
     def add(self, *_):
         pass
 
-    def remove(self, *_):
+    def remove(self, **_):
         pass
 
     def all(self):
@@ -56,6 +56,7 @@ class DatabaseBase(DatabaseInterface):
 
     structure: dict
     name: str
+    unique: tuple[str, ...] = ()
 
     def __init__(self, path: str):
         """Create a Database instance.
@@ -68,21 +69,34 @@ class DatabaseBase(DatabaseInterface):
 
         self.path = path
 
-        if not os.path.exists(self.path):
-            self.create()
+        self.create()
+        if self.name in ("downloads", "failed_downloads"):
+            with sqlite3.connect(self.path) as conn:
+                schema = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE name=?", (self.name,)
+                ).fetchone()[0]
+                if "ID TEXT UNIQUE" in schema.upper():
+                    # Preserve unscoped history without letting it skip other services.
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(f"ALTER TABLE {self.name} RENAME TO {self.name}_legacy")
+                    self._create_table(conn)
+                    columns = ", ".join(self.structure)
+                    values = "id, ''" if self.name == "downloads" else columns
+                    conn.execute(f"INSERT OR IGNORE INTO {self.name} ({columns}) SELECT {values} FROM {self.name}_legacy")
 
     def create(self):
         """Create a database."""
         with sqlite3.connect(self.path) as conn:
-            params = ", ".join(
-                f"{key} {' '.join(map(str.upper, props))} NOT NULL"
-                for key, props in self.structure.items()
-            )
-            command = f"CREATE TABLE {self.name} ({params})"
+            self._create_table(conn)
 
-            logger.debug("executing %s", command)
-
-            conn.execute(command)
+    def _create_table(self, conn):
+        params = ", ".join(
+            f"{key} {' '.join(map(str.upper, props))} NOT NULL"
+            for key, props in self.structure.items()
+        )
+        if self.unique:
+            params += f", UNIQUE ({', '.join(self.unique)})"
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {self.name} ({params})")
 
     def keys(self):
         """Get the column names of the table."""
@@ -162,8 +176,10 @@ class Downloads(DatabaseBase):
     """A table that stores the downloaded IDs."""
 
     name = "downloads"
+    unique = ("source", "id")
     structure: Final[dict] = {
-        "id": ["text", "unique"],
+        "id": ["text"],
+        "source": ["text"],
     }
 
 
@@ -171,10 +187,11 @@ class Failed(DatabaseBase):
     """A table that stores information about failed downloads."""
 
     name = "failed_downloads"
+    unique = ("source", "media_type", "id")
     structure: Final[dict] = {
         "source": ["text"],
         "media_type": ["text"],
-        "id": ["text", "unique"],
+        "id": ["text"],
     }
 
 
@@ -197,11 +214,12 @@ class Database:
     failed: DatabaseInterface
     releases: DatabaseInterface
 
-    def downloaded(self, item_id: str) -> bool:
-        return self.downloads.contains(id=item_id)
+    def downloaded(self, item_id: str, source: str) -> bool:
+        return self.downloads.contains(id=item_id, source=source)
 
-    def set_downloaded(self, item_id: str):
-        self.downloads.add((item_id,))
+    def set_downloaded(self, item_id: str, source: str):
+        self.downloads.add((item_id, source))
+        self.failed.remove(source=source, media_type="track", id=item_id)
 
     def get_failed_downloads(self) -> list[tuple[str, str, str]]:
         return self.failed.all()
@@ -217,4 +235,5 @@ class Database:
         """Mark entire release as downloaded."""
         from datetime import datetime
         download_date = datetime.now().isoformat()
-        self.releases.add((release_id, media_type, source, download_date, track_count))
+        if not self.release_downloaded(release_id, media_type, source):
+            self.releases.add((release_id, media_type, source, download_date, track_count))

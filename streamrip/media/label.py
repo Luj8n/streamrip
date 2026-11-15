@@ -69,12 +69,12 @@ class PendingLabel(Pending):
             resp = await self.client.get_metadata(self.id, "label")
         except NonStreamableError as e:
             logger.error(f"Error resolving Label: {e}")
-            return None
+            raise
         try:
             meta = LabelMetadata.from_resp(resp, self.client.source)
         except Exception as e:
             logger.error(f"Error resolving Label: {e}")
-            return None
+            raise
         album_ids = meta.album_ids()
         
         # Check if all albums are downloaded and log appropriately

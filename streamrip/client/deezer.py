@@ -72,7 +72,9 @@ class DeezerClient(Client):
             raise MissingCredentialsError
         success = self.client.login_via_arl(arl)
         if not success:
-            raise AuthenticationError
+            raise AuthenticationError(
+                "Deezer rejected the ARL cookie; update deezer.arl in the config."
+            )
         self.logged_in = True
 
     async def _api_call(self, func, *args, **kwargs):
@@ -122,6 +124,11 @@ class DeezerClient(Client):
         if detailed_track_info:
             if "SNG_CONTRIBUTORS" in detailed_track_info:
                 contributors = detailed_track_info["SNG_CONTRIBUTORS"]
+                item["credits"] = [
+                    f"{name} ({role})"
+                    for role, names in contributors.items()
+                    for name in names
+                ]
                 if "composer" in contributors:
                     item["composer"] = contributors["composer"]
                 if "author" in contributors:
@@ -228,7 +235,6 @@ class DeezerClient(Client):
 
         token = track_info["TRACK_TOKEN"]
         try:
-            logger.debug("Fetching deezer url with token %s", token)
             url = self.client.get_track_url(token, format_str)
         except deezer.WrongLicense:
             raise NonStreamableError(
@@ -251,7 +257,6 @@ class DeezerClient(Client):
             )
 
         dl_info["url"] = url
-        logger.debug("dz track info: %s", track_info)
         return DeezerDownloadable(self.session, dl_info)
 
     def _get_encrypted_file_url(
@@ -284,5 +289,4 @@ class DeezerClient(Client):
             AES.new(b"jo6aey6haid2Teih", AES.MODE_ECB).encrypt(info_bytes),
         ).decode("utf-8")
         url = f"https://e-cdns-proxy-{track_hash[0]}.dzcdn.net/mobile/1/{path}"
-        logger.debug("Encrypted file path %s", url)
         return url

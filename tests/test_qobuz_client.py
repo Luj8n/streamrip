@@ -127,25 +127,10 @@ def test_parse_qobuz_performers():
     assert QobuzClient.parse_performers("Single Artist, MainArtist") == {"MainArtist": ["Single Artist"]}
 
 
-def test_deduplicate_copyright():
-    """Test deduplication of copyright strings."""
-    # Test basic duplication cases
-    assert QobuzClient.deduplicate_copyright("2022 Nuclear Blast 2022 Nuclear Blast") == "2022 Nuclear Blast"
-    assert QobuzClient.deduplicate_copyright("2023 Merge Records 2023 Merge Records") == "2023 Merge Records"
-    assert QobuzClient.deduplicate_copyright("2020 Universal Music 2020 Universal Music") == "2020 Universal Music"
-    
-    # Test cases that should not be modified
-    assert QobuzClient.deduplicate_copyright("Single Label") == "Single Label"
-    assert QobuzClient.deduplicate_copyright("") == ""
-    assert QobuzClient.deduplicate_copyright("Different First Second Different") == "Different First Second Different"
-    
-    # Test three-word duplication
-    assert QobuzClient.deduplicate_copyright("A B C A B C") == "A B C"
-
-
 def test_qobuz_metadata_integration():
     """Test that parsing happens correctly in metadata classes."""
     import json
+
     from streamrip.metadata.album import AlbumMetadata
     from streamrip.metadata.track import TrackMetadata
     
@@ -155,11 +140,8 @@ def test_qobuz_metadata_integration():
     album_resp = qobuz_track_resp["album"].copy()
     album_resp["copyright"] = "2022 Nuclear Blast 2022 Nuclear Blast"  # Add duplication
     
-    # Simulate client-level deduplication
-    album_resp["copyright"] = QobuzClient.deduplicate_copyright(album_resp["copyright"])
-    
     album_meta = AlbumMetadata.from_qobuz(album_resp)
-    assert album_meta.copyright == "2022 Nuclear Blast"  # Should be deduplicated
+    assert album_meta.copyright == "2022 Nuclear Blast 2022 Nuclear Blast"
     
     # Test track performer parsing (simulate client processing)
     track_resp = qobuz_track_resp.copy()
@@ -174,7 +156,7 @@ def test_qobuz_metadata_integration():
     assert "John Darnielle" in track_meta.composer  # Base composer from API
     assert "Isaiah Mitchell" in track_meta.composer  # From performers
     assert "Mario Rubalcaba" in track_meta.composer  # From performers
-    assert track_meta.author == "Isaiah Mitchell"  # From performers Author role
+    assert track_meta.author == ["Isaiah Mitchell"]  # From performers Author role
     
     # Test duplicate avoidance - if same composer is in both base and performers
     track_resp_duplicate = qobuz_track_resp.copy()
@@ -183,8 +165,29 @@ def test_qobuz_metadata_integration():
     track_meta_duplicate = TrackMetadata.from_qobuz(album_meta, track_resp_duplicate)
     
     # John Darnielle should only appear once despite being in both base and performers
-    composer_parts = track_meta_duplicate.composer.split(", ")
+    composer_parts = track_meta_duplicate.composer
     john_count = sum(1 for part in composer_parts if "John Darnielle" in part)
     assert john_count == 1, f"John Darnielle appears {john_count} times, should be 1"
 
 
+
+
+async def test_login_error_does_not_expose_credentials(caplog):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from streamrip.exceptions import AuthenticationError
+
+    cfg = Config.defaults()
+    cfg.session.qobuz.email_or_userid = 'example-user'
+    cfg.session.qobuz.password_or_token = 'private-test-token'
+    cfg.session.qobuz.use_auth_token = True
+    cfg.session.qobuz.app_id = 'app'
+    cfg.session.qobuz.secrets = ['private-app-secret']
+    client = QobuzClient(cfg)
+    client.get_session = AsyncMock(return_value=MagicMock())
+    client._api_request = AsyncMock(return_value=(401, {}))
+    with pytest.raises(AuthenticationError) as error:
+        await client.login()
+    output = str(error.value) + caplog.text
+    assert 'private-test-token' not in output
+    assert 'private-app-secret' not in output
